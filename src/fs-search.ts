@@ -39,7 +39,7 @@ const DEFAULT_MAX_VISITED = 100_000
  * case-insensitively so `Node_Modules` / `.GIT` stay skipped on every
  * platform. The directory itself is neither matched nor descended.
  */
-const SEARCH_SKIP_DIRS = new Set([
+export const SEARCH_SKIP_DIRS = new Set([
   '.git',
   'node_modules',
   '.pnpm-store',

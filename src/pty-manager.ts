@@ -10,12 +10,15 @@ import { chmodSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { userInfo } from 'node:os'
-import type { IPty } from 'node-pty'
 import { loadRequiredNodePty, type NodePtyModule } from './pty-deps.ts'
 import { SidebarError } from './wire.ts'
+import type { SidebarShell } from './ssh-remote.ts'
 
 /** Per-terminal transcript bound (bytes kept for replay). */
 const TRANSCRIPT_LIMIT = 1 << 20
+
+/** Yields an IPty-compatible remote shell for a remote cwd, or null for a local cwd. */
+export type RemoteShellFactory = (cwd: string, opts: { cols: number; rows: number }) => Promise<SidebarShell | null>
 
 /**
  * Restore the executable bit pnpm strips from node-pty's prebuilt
@@ -53,7 +56,7 @@ export interface SidebarPty {
    *  the page-load hydrate race can attach the real cwd after the first
    *  connect, and a shell in the wrong directory must not linger). */
   cwd: string
-  pty: IPty
+  pty: SidebarShell
   /** Output accumulated since spawn (bounded; head dropped when over the limit). */
   transcript: string
   /** Whether the top-level process exited (transcript stays replayable). */
@@ -97,6 +100,8 @@ export class PtyManager {
     private readonly shellArgs: string[] = [],
     /** The loaded node-pty module (injected so a broken install degrades instead of crashing the plugin). */
     private readonly nodePty: NodePtyModule = loadRequiredNodePty(),
+    /** Optional remote-shell factory (dsh-ssh bridge); null result = local spawn. */
+    private readonly remoteFactory?: RemoteShellFactory,
   ) {}
 
   /** All live terminal keys of one session. */
@@ -126,7 +131,7 @@ export class PtyManager {
    * @returns the live handle.
    * @throws {SidebarError} pty-error when the per-session cap is reached.
    */
-  open(
+  async open(
     sessionId: string,
     tabId: string,
     cwd: string,
@@ -134,7 +139,7 @@ export class PtyManager {
     rows: number,
     shell?: string,
     shellArgs?: string[],
-  ): SidebarPty {
+  ): Promise<SidebarPty> {
     const key = `${sessionId}:${tabId}`
     this.cancelClose(key)
     const existing = this.sessions.get(key)
@@ -148,28 +153,34 @@ export class PtyManager {
     if (this.keysOf(sessionId).length >= this.maxPerSession) {
       throw new SidebarError('pty-error', `terminal limit reached (${this.maxPerSession}) for this session`, 400)
     }
+    const clampedCols = Math.max(2, Math.floor(cols))
+    const clampedRows = Math.max(2, Math.floor(rows))
+    const spawnLocal = (): SidebarShell => this.nodePty.spawn(shell ?? this.shell, shellSpawnArgs(shellArgs ?? this.shellArgs), {
+      name: 'xterm-256color',
+      cols: clampedCols,
+      rows: clampedRows,
+      cwd,
+      env: { ...process.env },
+    })
+    const spawned: SidebarShell = this.remoteFactory !== undefined
+      ? (await this.remoteFactory(cwd, { cols: clampedCols, rows: clampedRows })) ?? spawnLocal()
+      : spawnLocal()
     const handle: SidebarPty = {
       key,
       sessionId,
       tabId,
       cwd,
-      pty: this.nodePty.spawn(shell ?? this.shell, shellSpawnArgs(shellArgs ?? this.shellArgs), {
-        name: 'xterm-256color',
-        cols: Math.max(2, Math.floor(cols)),
-        rows: Math.max(2, Math.floor(rows)),
-        cwd,
-        env: { ...process.env },
-      }),
+      pty: spawned,
       transcript: '',
       exited: false,
     }
-    handle.pty.onData((data) => {
+    spawned.onData((data) => {
       handle.transcript += data
       if (handle.transcript.length > TRANSCRIPT_LIMIT) {
         handle.transcript = handle.transcript.slice(handle.transcript.length - TRANSCRIPT_LIMIT)
       }
     })
-    handle.pty.onExit(({ exitCode }) => {
+    spawned.onExit(({ exitCode }) => {
       handle.exited = true
       handle.exitCode = exitCode
     })

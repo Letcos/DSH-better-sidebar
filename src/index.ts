@@ -39,6 +39,19 @@ import { isTrustedApiRequest, isLoopbackHostname } from './trust-fence.ts'
 import { registerBundleRoute } from './bundle-route.ts'
 import { launchExternal } from './open-external.ts'
 import * as git from './git.ts'
+import {
+  createRemoteShell,
+  localToRemote,
+  remoteListDirectory,
+  remoteReadBytes,
+  remoteReadText,
+  remoteSearch,
+  remoteUpload,
+  remoteWriteFile,
+  routeByCwd,
+  withRemoteConn,
+} from './ssh-remote.ts'
+import * as remoteGit from './git-remote.ts'
 import { SettingsConflictError, settingsNamespace, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { defaultShell, ensureSpawnHelper, PtyManager, shellDisplayName } from './pty-manager.ts'
 import { AgentPtyRegistry, clampDims, type AgentTerminalHandle } from './agent-pty.ts'
@@ -275,9 +288,11 @@ function buildApi(
     return { sessionId, cwd: sessionCwdOf(ctx, sessionId, clientCwd) }
   }
   /** Resolve the optional Git-panel checkout selector against the authoritative
-   * session repository. Unlike `cwd`, `worktree` is never trusted directly. */
+   * session repository. Unlike `cwd`, `worktree` is never trusted directly.
+   * A remote workspace has a single root — no linked-worktree resolution. */
   const gitCwdOf = async (payload: unknown): Promise<{ sessionId: string; cwd: string }> => {
     const base = cwdOf(payload)
+    if (routeByCwd(base.cwd).kind === 'remote') return base
     const record = payload as { worktree?: unknown } | null
     const requested = typeof record?.worktree === 'string' && record.worktree !== '' ? record.worktree : undefined
     return { sessionId: base.sessionId, cwd: await git.resolveWorktree(base.cwd, requested) }
@@ -295,12 +310,24 @@ function buildApi(
   return {
     'session.cwd': (payload) => {
       const { sessionId, cwd } = cwdOf(payload)
+      const route = routeByCwd(cwd)
+      if (route.kind === 'remote') {
+        // A remote workspace is rooted at the placeholder — navigation above
+        // the remote root is refused (parent null), and the root label shows
+        // the remote basename instead of the base64 placeholder segment.
+        const label = basename(route.remoteCwd)
+        return { sessionId, cwd, root: label === '' ? route.remoteCwd : label, parent: null }
+      }
       return { sessionId, cwd, root: rootLabel(cwd), parent: parentOf(cwd) ?? null }
     },
     'fs.tree': async (payload) => {
       const { cwd } = cwdOf(payload)
       const record = payload as { path?: unknown }
-      const target = record.path === undefined ? cwd : await ensureWorkspacePath(cwd, requireString(payload, 'path'))
+      const requested = typeof record.path === 'string' && record.path !== '' ? record.path : undefined
+      const remote = await withRemoteConn(ctx, cwd, (conn, route) =>
+        remoteListDirectory(conn, requested === undefined ? route.remoteCwd : localToRemote(requested, route), route, resolved.listLimit))
+      if (remote !== null) return remote
+      const target = requested === undefined ? cwd : await ensureWorkspacePath(cwd, requested)
       return listDirectory(target, resolved.listLimit)
     },
     'fs.search': async (payload) => {
@@ -309,6 +336,8 @@ function buildApi(
       // must never escape the workspace), budgeted inside searchFiles.
       const { cwd } = cwdOf(payload)
       const query = requireString(payload, 'query')
+      const remote = await withRemoteConn(ctx, cwd, (conn, route) => remoteSearch(conn, route.remoteCwd, query))
+      if (remote !== null) return remote
       return searchFiles(cwd, query)
     },
     'fs.read': async (payload) => {
@@ -317,16 +346,29 @@ function buildApi(
       // names; the untracked diff view reads the file through this route). A
       // child-repo path is relative to the selected repoRoot, not the session
       // cwd; thread it so the path resolves inside the authorized workspace.
+      const raw = requireString(payload, 'path')
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        const result = await remoteReadText(conn, localToRemote(raw, route), resolved.readLimit)
+        if (result.binary) return { kind: 'binary', size: result.size, truncated: result.truncated, head: result.head }
+        return { kind: 'text', content: result.content, truncated: result.truncated }
+      })
+      if (remote !== null) return remote
       const selected = selectedRepoOf(payload)
-      const path = await ensureWorkspacePath(cwd, await resolveGitPath(cwd, requireString(payload, 'path'), selected))
+      const path = await ensureWorkspacePath(cwd, await resolveGitPath(cwd, raw, selected))
       const { content, truncated, binary, size, head } = await readText(path, resolved.readLimit)
       if (binary) return { kind: 'binary', size, truncated, head }
       return { kind: 'text', content, truncated }
     },
     'fs.write': async (payload) => {
       const { cwd } = cwdOf(payload)
-      const path = await ensureWorkspaceWritePath(cwd, requireString(payload, 'path'))
+      const raw = requireString(payload, 'path')
       const content = requireString(payload, 'content')
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        await remoteWriteFile(conn, localToRemote(raw, route), Buffer.from(content, 'utf8'))
+        return { ok: true }
+      })
+      if (remote !== null) return remote
+      const path = await ensureWorkspaceWritePath(cwd, raw)
       const tmp = `${path}.dsh-sidebar-tmp-${process.pid}`
       try {
         await mkdir(dirname(path), { recursive: true })
@@ -340,6 +382,8 @@ function buildApi(
     },
     'git.worktrees': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
+      const remote = await withRemoteConn(ctx, cwd, (conn, route) => remoteGit.remoteWorktrees(conn, route.remoteCwd))
+      if (remote !== null) return remote
       const selected = selectedRepoOf(payload)
       // A workspace container (no repo at cwd) has child repos; the worktree
       // list belongs to the SELECTED child, not the container. Thread the
@@ -349,11 +393,18 @@ function buildApi(
     },
     'git.status': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
+      const remote = await withRemoteConn(ctx, cwd, (conn, route) => remoteGit.remoteStatus(conn, route.remoteCwd))
+      if (remote !== null) return remote
       return git.status(cwd, selectedRepoOf(payload))
     },
     'git.diff': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const record = payload as { path?: unknown; staged?: unknown }
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        const path = record.path === undefined ? undefined : localToRemote(requireString(payload, 'path'), route)
+        return { diff: await remoteGit.remoteDiff(conn, route.remoteCwd, path, record.staged === true) }
+      })
+      if (remote !== null) return remote
       const repoRoot = selectedRepoOf(payload)
       const path = record.path === undefined ? undefined : await resolveGitPath(cwd, requireString(payload, 'path'), repoRoot)
       return { diff: await git.diff(cwd, path, record.staged === true, repoRoot) }
@@ -361,6 +412,12 @@ function buildApi(
     'git.stage': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const record = payload as { path?: unknown }
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        const path = record.path === undefined ? undefined : localToRemote(requireString(payload, 'path'), route)
+        await remoteGit.remoteStage(conn, route.remoteCwd, path)
+        return { ok: true }
+      })
+      if (remote !== null) return remote
       const path = record.path === undefined ? undefined : requireString(payload, 'path')
       await git.stage(cwd, path, selectedRepoOf(payload))
       return { ok: true }
@@ -368,6 +425,12 @@ function buildApi(
     'git.unstage': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const record = payload as { path?: unknown }
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        const path = record.path === undefined ? undefined : localToRemote(requireString(payload, 'path'), route)
+        await remoteGit.remoteUnstage(conn, route.remoteCwd, path)
+        return { ok: true }
+      })
+      if (remote !== null) return remote
       const path = record.path === undefined ? undefined : requireString(payload, 'path')
       await git.unstage(cwd, path, selectedRepoOf(payload))
       return { ok: true }
@@ -375,16 +438,29 @@ function buildApi(
     'git.commit': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const message = requireString(payload, 'message')
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        await remoteGit.remoteCommit(conn, route.remoteCwd, message)
+        return { ok: true }
+      })
+      if (remote !== null) return remote
       await git.commit(cwd, message, selectedRepoOf(payload))
       return { ok: true }
     },
     'git.branch': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
+      const remote = await withRemoteConn(ctx, cwd, (conn, route) => remoteGit.remoteBranches(conn, route.remoteCwd))
+      if (remote !== null) return remote
       return git.branches(cwd, selectedRepoOf(payload))
     },
     'git.checkout': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      await git.checkout(cwd, requireString(payload, 'branch'), selectedRepoOf(payload))
+      const branch = requireString(payload, 'branch')
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        await remoteGit.remoteCheckout(conn, route.remoteCwd, branch)
+        return { ok: true }
+      })
+      if (remote !== null) return remote
+      await git.checkout(cwd, branch, selectedRepoOf(payload))
       return { ok: true }
     },
     'git.log': async (payload) => {
@@ -396,33 +472,63 @@ function buildApi(
       const skip = typeof record.skip === 'number' && Number.isInteger(record.skip) && record.skip >= 0
         ? record.skip
         : undefined
+      const remote = await withRemoteConn(ctx, cwd, (conn, route) => remoteGit.remoteLog(conn, route.remoteCwd, count, skip))
+      if (remote !== null) return remote
       return git.log(cwd, count, skip, selectedRepoOf(payload))
     },
     'git.commit-diff': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      return { diff: await git.commitDiff(cwd, requireString(payload, 'hash'), selectedRepoOf(payload)) }
+      const hash = requireString(payload, 'hash')
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        return { diff: await remoteGit.remoteCommitDiff(conn, route.remoteCwd, hash) }
+      })
+      if (remote !== null) return remote
+      return { diff: await git.commitDiff(cwd, hash, selectedRepoOf(payload)) }
     },
     'git.discard': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
+      const raw = requireString(payload, 'path')
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        await remoteGit.remoteDiscard(conn, route.remoteCwd, localToRemote(raw, route))
+        return { ok: true }
+      })
+      if (remote !== null) return remote
       const repoRoot = selectedRepoOf(payload)
-      await git.discard(cwd, await resolveGitPath(cwd, requireString(payload, 'path'), repoRoot), repoRoot)
+      await git.discard(cwd, await resolveGitPath(cwd, raw, repoRoot), repoRoot)
       return { ok: true }
     },
     'git.revert': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      await git.revert(cwd, requireString(payload, 'hash'), selectedRepoOf(payload))
+      const hash = requireString(payload, 'hash')
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        await remoteGit.remoteRevert(conn, route.remoteCwd, hash)
+        return { ok: true }
+      })
+      if (remote !== null) return remote
+      await git.revert(cwd, hash, selectedRepoOf(payload))
       return { ok: true }
     },
     'git.cherry-pick': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      await git.cherryPick(cwd, requireString(payload, 'hash'), selectedRepoOf(payload))
+      const hash = requireString(payload, 'hash')
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        await remoteGit.remoteCherryPick(conn, route.remoteCwd, hash)
+        return { ok: true }
+      })
+      if (remote !== null) return remote
+      await git.cherryPick(cwd, hash, selectedRepoOf(payload))
       return { ok: true }
     },
     'git.show': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      const repoRoot = selectedRepoOf(payload)
-      const path = await resolveGitPath(cwd, requireString(payload, 'path'), repoRoot)
       const rev = requireString(payload, 'rev')
+      const raw = requireString(payload, 'path')
+      const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+        return { content: await remoteGit.remoteShow(conn, route.remoteCwd, rev, localToRemote(raw, route)) }
+      })
+      if (remote !== null) return remote
+      const repoRoot = selectedRepoOf(payload)
+      const path = await resolveGitPath(cwd, raw, repoRoot)
       return { content: await git.show(cwd, rev, path, repoRoot) }
     },
     // Release a terminal immediately. The WebSocket close frame already does
@@ -633,7 +739,7 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
     ctx.logger?.warn(`[dsh-better-sidebar] node-pty (${DSH_NODE_PTY_RANGE}) failed to load: ${detail}`)
   }
   const ptyManager = nodePty !== null
-    ? new PtyManager(terminalShell, resolved.terminalsPerSession, resolved.shellArgs, nodePty)
+    ? new PtyManager(terminalShell, resolved.terminalsPerSession, resolved.shellArgs, nodePty, (cwd, opts) => createRemoteShell(ctx, cwd, opts))
     : null
   // The agent-owned terminal registry: parallel to the UI-tab ptyManager,
   // keyed by uuid (the model's opaque handle) instead of `${sessionId}:${tabId}`,
@@ -815,6 +921,12 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
           throw new SidebarError('bad-request', 'sessionId, dir, and relativePath are required')
         }
         const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
+        const remote = await withRemoteConn(ctx, cwd, (conn, route) =>
+          remoteUpload(conn, route, dir, relativePath, req, resolved.uploadLimit))
+        if (remote !== null) {
+          writeOk(res, remote)
+          return
+        }
         const { path, size } = await writeWorkspaceUpload({
           cwd,
           dir,
@@ -856,6 +968,20 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         const raw = url.searchParams.get('path')
         if (sessionId === null || raw === null) throw new SidebarError('bad-request', 'sessionId and path are required')
         const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
+        const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+          const remotePath = localToRemote(raw, route)
+          const body = await remoteReadBytes(conn, remotePath, resolved.mediaLimit)
+          return { body, type: mediaTypeForPath(remotePath), name: basename(remotePath) }
+        })
+        if (remote !== null) {
+          const headers: Record<string, string> = { 'content-type': remote.type, 'cache-control': 'no-cache' }
+          if (url.searchParams.get('download') === '1') {
+            headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(remote.name)}`
+          }
+          res.writeHead(200, headers)
+          res.end(remote.body)
+          return
+        }
         const path = await ensureWorkspacePath(cwd, raw)
         const info = await stat(path)
         if (!info.isFile() || info.size > resolved.mediaLimit) {
@@ -915,6 +1041,25 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         // real-path guard, with the same semantics as the media route's
         // fallback.
         const cwd = sessionCwdOf(ctx, sessionId)
+        const remote = await withRemoteConn(ctx, cwd, async (conn, route) => {
+          const remotePath = localToRemote(path, route)
+          const body = await remoteReadBytes(conn, remotePath, resolved.mediaLimit)
+          return { body, type: mediaTypeForPath(remotePath) }
+        })
+        if (remote !== null) {
+          res.writeHead(200, {
+            'content-type': remote.type === 'text/html' ? 'text/html; charset=utf-8' : remote.type,
+            'cache-control': 'no-cache',
+            'x-content-type-options': 'nosniff',
+            'referrer-policy': 'no-referrer',
+            // The sandbox directive (no allow-same-origin → opaque origin) is
+            // the previewer's security boundary even for top-level loads;
+            // object-src 'none' blocks plugin embeds.
+            'content-security-policy': "sandbox allow-scripts allow-popups allow-downloads allow-modals; object-src 'none'",
+          })
+          res.end(remote.body)
+          return
+        }
         const absolute = await ensureWorkspacePath(cwd, path)
         const info = await stat(absolute)
         if (!info.isFile() || info.size > resolved.mediaLimit) {
@@ -1135,7 +1280,7 @@ async function attachTerminal(
     // Settings-page shell overrides win over the yaml/auto shell for
     // terminals opened from now on (existing pty handles keep their shell).
     const overrides = shellOverridesOf(getSettings)
-    const handle = ptyManager.open(sessionId, tabId, cwd, 80, 24, overrides.shell, overrides.shellArgs)
+    const handle = await ptyManager.open(sessionId, tabId, cwd, 80, 24, overrides.shell, overrides.shellArgs)
     // Replay the transcript, then follow live output.
     if (handle.transcript !== '') ws.send(handle.transcript)
     const onData = (data: string): void => {
