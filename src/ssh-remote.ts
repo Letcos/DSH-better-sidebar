@@ -227,7 +227,11 @@ function hostConfigOf(ctx: Context, hostId: string): SshHostConfig {
   if (settings !== null && typeof settings === 'object') {
     const get = (settings as { get?: unknown }).get
     if (typeof get === 'function') {
-      hosts = readSshHosts((ns: string) => (get as (ns: string) => unknown)(ns)).hosts
+      // `get(ns)` reads `this.registrations`, so it must be invoked as a method
+      // with `this` bound to the settings service (an unbound call throws and
+      // safeGet would swallow it, yielding an empty hosts dict).
+      const reader = (ns: string): unknown => (get as (ns: string) => unknown).call(settings, ns)
+      hosts = readSshHosts(reader).hosts
     }
   }
   const host = hosts[hostId]
