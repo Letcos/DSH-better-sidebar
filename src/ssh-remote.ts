@@ -449,7 +449,7 @@ export async function remoteSearch(
   if (needle === '') return { matches: [], truncated: false }
   const maxMatches = opts.maxMatches ?? 200
   const maxVisited = opts.maxVisited ?? 100_000
-  const pruneExpr = [...SEARCH_SKIP_DIRS].map((name) => `-name ${shellQuote(name)}`).join(' -o ')
+  const pruneExpr = [...SEARCH_SKIP_DIRS].map((name) => `-iname ${shellQuote(name)}`).join(' -o ')
   const cmd = 'find ' + shellQuote(remoteRoot)
     + ' -mindepth 1 \\( -type d \\( ' + pruneExpr + ' \\) -prune \\) -o -printf \'%P\\t%y\\n\''
     + ' | head -n ' + (maxVisited + 1)
