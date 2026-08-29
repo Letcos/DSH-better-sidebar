@@ -37,7 +37,6 @@ import { FitAddon } from '@xterm/addon-fit'
 import { writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import '@xterm/xterm/css/xterm.css'
 import { t } from './locales.ts'
-import { stripTerminalReplies } from './terminal-input.ts'
 import { openWhenSized } from './open-when-sized.ts'
 import { api, type SessionScope, type TerminalDepsStatus } from './api.ts'
 import { agentUuidOf, isAgentTabId, type SidebarStore } from './state.ts'
@@ -227,14 +226,7 @@ export function TerminalView(props: { scope: SessionScope; tabId: string; store:
     connectRef.current = connect
 
     const inputSub = term.onData((data) => {
-      if (socket !== null && socket.readyState === WebSocket.OPEN) {
-        // xterm.js emits terminal-query replies (DA/DECRPM/OSC color reports)
-        // on onData alongside keystrokes; a remote login shell's startup
-        // queries are fire-and-forget, so forwarding the replies would echo
-        // them back as garbage at the prompt. Strip them before sending.
-        const input = stripTerminalReplies(data)
-        if (input !== '') socket.send(input)
-      }
+      if (socket !== null && socket.readyState === WebSocket.OPEN) socket.send(data)
     })
     const observer = new ResizeObserver(() => {
       try {
