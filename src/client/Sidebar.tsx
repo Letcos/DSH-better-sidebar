@@ -135,7 +135,7 @@ interface TabContentProps extends TabContentMemoKey {
 
 /** Render the content of one tab (dispatched by type). */
 const TabContent = memo(function TabContent(props: TabContentProps) {
-  const { tab, sessionId, cwd, expanded, revealed, onToggleDir, onReferenceFile, ctx, store, visible, onSubagentJump, onOpenDiff } = props
+  const { tab, sessionId, cwd, expanded, revealed, rootLabel, onToggleDir, onReferenceFile, ctx, store, visible, onSubagentJump, onOpenDiff } = props
   const scope = { sessionId, cwd }
   const descriptor = ctx.get('betterSidebar')?.getTab(tab.type)
   if (descriptor === undefined) {
@@ -153,7 +153,7 @@ const TabContent = memo(function TabContent(props: TabContentProps) {
     RenderBoundary,
     { className: css.tabBoundaryError },
     createElement(descriptor.component, {
-      ctx, store, scope, tab, visible, expanded, revealed,
+      ctx, store, scope, tab, visible, expanded, revealed, rootLabel,
       onToggleDir, onReferenceFile, onOpenDiff, onSubagentJump,
     }),
   )
@@ -391,17 +391,25 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
     store.reduce(migrateBottomTabs)
   }, [narrow, sessionId, store])
 
-  // While the session's header is still hydrating (or the session is blank),
-  // the list summary may carry no cwd; ask the host once (it falls back to
-  // the process cwd) so the explorer root and terminal cwd are real from
-  // first paint instead of showing "no session".
+  // The session's cwd comes from the list summary (or the host fallback while
+  // it hydrates). Its display label, however, only the host knows: a remote
+  // placeholder cwd's basename is a base64 segment the client must not render,
+  // so session.cwd returns the human-readable "<host> / <dir>" root label.
+  // Fetch once per session (re-run when the summary lands so a late-hydrating
+  // header corrects the label).
   const [fetchedCwd, setFetchedCwd] = useState<string | undefined>(undefined)
+  const [rootLabel, setRootLabel] = useState<string | undefined>(undefined)
   useEffect(() => {
     setFetchedCwd(undefined)
-    if (sessionId === undefined || summaryCwd !== undefined) return
+    setRootLabel(undefined)
+    if (sessionId === undefined) return
     let cancelled = false
-    api.sessionCwd({ sessionId })
-      .then(result => { if (!cancelled) setFetchedCwd(result.cwd) })
+    api.sessionCwd({ sessionId, cwd: summaryCwd })
+      .then(result => {
+        if (cancelled) return
+        setFetchedCwd(result.cwd)
+        setRootLabel(result.root)
+      })
       .catch(() => { /* the explorer/git rows surface their own errors */ })
     return () => { cancelled = true }
   }, [sessionId, summaryCwd])
@@ -1316,6 +1324,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
       paneId={paneId}
       sessionId={sessionId}
       cwd={cwd}
+      rootLabel={rootLabel}
       expanded={state.expanded}
       revealed={state.revealed ?? []}
       onToggleDir={(path) => { store.reduce(s => toggleExpanded(s, path)) }}

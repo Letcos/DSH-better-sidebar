@@ -221,24 +221,48 @@ function sshPoolOf(ctx: Context): SidebarSshPool | undefined {
   return value as SidebarSshPool
 }
 
-function hostConfigOf(ctx: Context, hostId: string): SshHostConfig {
+/** Read the dsh-ssh-hosts dict through the settings service (lenient: empty on absence). */
+function readHosts(ctx: Context): Record<string, SshHostConfig> {
   const settings = readService(ctx, 'settings')
-  let hosts: Record<string, SshHostConfig> = {}
-  if (settings !== null && typeof settings === 'object') {
-    const get = (settings as { get?: unknown }).get
-    if (typeof get === 'function') {
-      // `get(ns)` reads `this.registrations`, so it must be invoked as a method
-      // with `this` bound to the settings service (an unbound call throws and
-      // safeGet would swallow it, yielding an empty hosts dict).
-      const reader = (ns: string): unknown => (get as (ns: string) => unknown).call(settings, ns)
-      hosts = readSshHosts(reader).hosts
-    }
-  }
-  const host = hosts[hostId]
+  if (settings === null || typeof settings !== 'object') return {}
+  const get = (settings as { get?: unknown }).get
+  if (typeof get !== 'function') return {}
+  // `get(ns)` reads `this.registrations`, so it must be invoked as a method
+  // with `this` bound to the settings service (an unbound call throws and
+  // safeGet would swallow it, yielding an empty hosts dict).
+  const reader = (ns: string): unknown => (get as (ns: string) => unknown).call(settings, ns)
+  return readSshHosts(reader).hosts
+}
+
+function hostConfigOf(ctx: Context, hostId: string): SshHostConfig {
+  const host = readHosts(ctx)[hostId]
   if (host === undefined || typeof host !== 'object') {
     throw new SidebarError('fs-error', `remote host "${hostId}" is not configured in dsh-ssh-hosts — add it in Settings → SSH hosts`, 400)
   }
   return { ...host, id: hostId }
+}
+
+/** Human display name for a remote host: the configured `name`, else the hostId. */
+export function hostDisplayNameOf(ctx: Context, hostId: string): string {
+  const host = readHosts(ctx)[hostId]
+  if (host !== undefined && typeof host.name === 'string' && host.name.trim() !== '') {
+    return host.name.trim()
+  }
+  return hostId
+}
+
+/**
+ * The display label for a remote cwd: `<host display name> / <remote basename>`
+ * (mirror of dsh-ssh's `placeholderWorkspaceTitle`), or undefined for a local
+ * cwd. The local placeholder directory's own basename is an unreadable base64
+ * segment and must never be shown to the user.
+ */
+export function remoteDisplayLabel(ctx: Context, cwd: string): string | undefined {
+  const route = routeByCwd(cwd)
+  if (route.kind !== 'remote') return undefined
+  const base = posix.basename(route.remoteCwd)
+  const label = base === '' ? route.remoteCwd : base
+  return `${hostDisplayNameOf(ctx, route.hostId)} / ${label}`
 }
 
 /** Acquire one pooled connection for a hostId (release with `pool.release()`). */

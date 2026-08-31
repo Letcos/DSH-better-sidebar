@@ -25,6 +25,8 @@ export interface TabContentMemoKey {
   expanded: string[]
   /** Files highlighted in the file tree (the "Show in folder" reveal). */
   revealed: string[]
+  /** The explorer root's display label (host-provided; absent for local/undefined). */
+  rootLabel?: string
   localeRevision: string
   tabsVersion: number
 }
@@ -43,6 +45,7 @@ export function tabContentCompare(prev: TabContentMemoKey, next: TabContentMemoK
     prev.visible === next.visible &&
     prev.expanded === next.expanded &&
     prev.revealed === next.revealed &&
+    prev.rootLabel === next.rootLabel &&
     prev.localeRevision === next.localeRevision &&
     prev.tabsVersion === next.tabsVersion
   )

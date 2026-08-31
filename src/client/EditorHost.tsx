@@ -98,10 +98,12 @@ export function EditorHost(props: {
   tab: SidebarTab
   expanded: string[]
   revealed: string[]
+  /** Host-provided explorer root label ("<host> / <dir>" for a remote workspace). */
+  rootLabel?: string
   onToggleDir: (path: string) => void
   onReferenceFile: (path: string) => void
 }) {
-  const { ctx, store, scope, tab, expanded, revealed, onToggleDir, onReferenceFile } = props
+  const { ctx, store, scope, tab, expanded, revealed, rootLabel, onToggleDir, onReferenceFile } = props
   const path = tab.path ?? ''
   const title = tab.title
   // A folder window: the model's `sidebar_open` (or any caller) opens a
@@ -371,6 +373,7 @@ export function EditorHost(props: {
           full
           sessionId={scope.sessionId}
           cwd={folderRoot ?? scope.cwd}
+          rootLabel={folderRoot === undefined ? rootLabel : undefined}
           expanded={expanded}
           revealed={revealed}
           onToggle={onToggleDir}
@@ -490,6 +493,7 @@ export function EditorHost(props: {
             <TreePanel
               sessionId={scope.sessionId}
               cwd={scope.cwd}
+              rootLabel={rootLabel}
               expanded={expanded}
               revealed={revealed}
               onToggle={onToggleDir}

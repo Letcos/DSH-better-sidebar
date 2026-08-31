@@ -150,6 +150,9 @@ export interface TabComponentProps {
   expanded?: string[]
   /** The explorer's reveal-highlight set (ExplorerView; "Show in folder" targets). */
   revealed?: string[]
+  /** The explorer root's display label (the host-provided "<host> / <dir>" for a
+   *  remote workspace; falls back to the cwd basename when absent). */
+  rootLabel?: string
   onToggleDir?: (path: string) => void
   onReferenceFile?: (path: string) => void
   onOpenFile?: (path: string) => void

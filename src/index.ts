@@ -42,6 +42,7 @@ import * as git from './git.ts'
 import {
   createRemoteShell,
   localToRemote,
+  remoteDisplayLabel,
   remoteListDirectory,
   remoteReadBytes,
   remoteReadText,
@@ -310,13 +311,12 @@ function buildApi(
   return {
     'session.cwd': (payload) => {
       const { sessionId, cwd } = cwdOf(payload)
-      const route = routeByCwd(cwd)
-      if (route.kind === 'remote') {
+      const remoteLabel = remoteDisplayLabel(ctx, cwd)
+      if (remoteLabel !== undefined) {
         // A remote workspace is rooted at the placeholder — navigation above
-        // the remote root is refused (parent null), and the root label shows
-        // the remote basename instead of the base64 placeholder segment.
-        const label = basename(route.remoteCwd)
-        return { sessionId, cwd, root: label === '' ? route.remoteCwd : label, parent: null }
+        // the remote root is refused (parent null), and the root label is the
+        // human-readable "<host> / <basename>" (never the base64 placeholder segment).
+        return { sessionId, cwd, root: remoteLabel, parent: null }
       }
       return { sessionId, cwd, root: rootLabel(cwd), parent: parentOf(cwd) ?? null }
     },
