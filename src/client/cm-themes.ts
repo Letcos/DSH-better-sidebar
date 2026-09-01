@@ -34,7 +34,55 @@ export const cmSurfaceTheme = EditorView.theme({
   },
 })
 
-/** Scheme-specific surface tints (selection, active line). */
+/**
+ * Find-in-file panel surface (token-driven). The search panel docks at the
+ * bottom of the editor; its inputs/buttons mirror the path-input / icon-button
+ * styling in sidebar.module.css so the panel reads as native sidebar chrome.
+ */
+export const cmSearchTheme = EditorView.theme({
+  '.cm-panel.cm-search': {
+    padding: '6px 8px',
+    backgroundColor: 'var(--dsw-alias-bg-layer-1)',
+    borderTop: '1px solid var(--dsw-alias-border-l1)',
+    color: 'var(--dsw-alias-label-secondary)',
+    fontSize: '12px',
+  },
+  '.cm-panel.cm-search .cm-textfield': {
+    boxSizing: 'border-box',
+    height: '26px',
+    padding: '0 8px',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '6px',
+    backgroundColor: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-primary)',
+    font: 'var(--dsw-font-xxs-12)',
+  },
+  '.cm-panel.cm-search .cm-textfield:focus': {
+    outline: 'none',
+    borderColor: 'var(--dsw-alias-border-l2)',
+  },
+  '.cm-panel.cm-search .cm-button': {
+    padding: '2px 8px',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '6px',
+    backgroundColor: 'transparent',
+    color: 'var(--dsw-alias-label-secondary)',
+    font: 'var(--dsw-font-xxs-12)',
+    cursor: 'pointer',
+  },
+  '.cm-panel.cm-search .cm-button:hover': {
+    backgroundColor: 'var(--dsw-alias-interactive-bg-hover)',
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  '.cm-panel.cm-search label': {
+    color: 'var(--dsw-alias-label-tertiary)',
+  },
+  '.cm-panel.cm-search [name=close]': {
+    color: 'var(--dsw-alias-label-secondary)',
+  },
+})
+
+/** Scheme-specific surface tints (selection, active line, search matches). */
 function cmSurfaceTint(dark: boolean): ReturnType<typeof EditorView.theme> {
   return EditorView.theme({
     '.cm-selectionBackground, .cm-focused .cm-selectionBackground, ::selection': {
@@ -42,6 +90,19 @@ function cmSurfaceTint(dark: boolean): ReturnType<typeof EditorView.theme> {
     },
     '.cm-activeLine, .cm-activeLineGutter': {
       backgroundColor: dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
+    },
+    // Find-in-file match highlights. CodeMirror's own base theme keys these
+    // off `&light`/`&dark`, but this editor never applies a `cm-dark` class
+    // (its scheme lives in the compartment), so the defaults would always
+    // resolve to the light palette. Override them scheme-explicitly here.
+    '.cm-searchMatch': {
+      backgroundColor: dark ? 'rgba(0,255,255,0.16)' : 'rgba(255,255,0,0.30)',
+    },
+    '.cm-searchMatch-selected': {
+      backgroundColor: dark ? 'rgba(255,0,255,0.24)' : 'rgba(255,106,0,0.34)',
+    },
+    '.cm-selectionMatch': {
+      backgroundColor: dark ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.10)',
     },
   })
 }

@@ -295,6 +295,10 @@ export interface EditorToolbarState {
 export interface EditorToolbarControls {
   setMode(mode: 'preview' | 'edit'): void
   save(): void
+  /** Open (focus) the editor's find-in-file panel. Optional: viewers that
+   *  do not run a text editor leave it undefined and the host hides the
+   *  find button. */
+  openSearch?(): void
 }
 
 /** Describes one file previewer (builtins register themselves too). */

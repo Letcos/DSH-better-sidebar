@@ -19,11 +19,12 @@ import clsx from 'clsx'
 import { EditorState } from '@codemirror/state'
 import { EditorView as CodeMirrorView, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-import { IconCheckOutline16, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import { highlightSelectionMatches, openSearchPanel, search, searchKeymap } from '@codemirror/search'
+import { IconCheckOutline16, IconSearchOutline16, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { api, htmlUrl } from './api.ts'
 import { rewriteLocalImageUrls } from './markdown-images.ts'
 import { languageForPath } from './lang.ts'
-import { cmSurfaceTheme, CmThemeCompartment } from './cm-themes.ts'
+import { cmSearchTheme, cmSurfaceTheme, CmThemeCompartment } from './cm-themes.ts'
 import { isDarkScheme, subscribeColorScheme } from './theme.ts'
 import { SandboxStatusBar } from './SandboxStatusBar.tsx'
 import { appendToDraft } from './conversation-draft.ts'
@@ -55,6 +56,29 @@ interface SelectionPopup {
  * in the side card settings (warned); the toggle below reflects it.
  */
 export const HTML_IFRAME_SANDBOX = 'allow-scripts allow-popups allow-downloads allow-modals'
+
+/**
+ * CodeMirror's built-in search panel labels, localized through the plugin's
+ * own dictionary. The keys are CodeMirror's English phrase keys (its
+ * `phrase()` falls back to the key itself for anything unmapped — the
+ * screen-reader announcements stay English). The map is built at editor
+ * creation, so it follows the active locale when the file is opened.
+ */
+function editorSearchPhrases(): Record<string, string> {
+  return {
+    Find: t('find'),
+    Replace: t('replace'),
+    next: t('findNext'),
+    previous: t('findPrevious'),
+    all: t('findSelectAll'),
+    'match case': t('findMatchCase'),
+    regexp: t('findRegexp'),
+    'by word': t('findWholeWord'),
+    replace: t('replace'),
+    'replace all': t('replaceAll'),
+    close: t('close'),
+  }
+}
 
 export function TextEditor(props: FileViewerProps) {
   const { ctx, scope, path, viewerId, content, truncated } = props
@@ -134,6 +158,10 @@ export function TextEditor(props: FileViewerProps) {
         EditorState.tabSize.of(2),
         CodeMirrorView.contentAttributes.of({ spellcheck: 'false' }),
         cmSurfaceTheme,
+        cmSearchTheme,
+        search(),
+        highlightSelectionMatches(),
+        EditorState.phrases.of(editorSearchPhrases()),
         themeComp.of(dark),
         ...(language !== null ? [language] : []),
         CodeMirrorView.updateListener.of((update) => {
@@ -150,6 +178,7 @@ export function TextEditor(props: FileViewerProps) {
           },
           ...defaultKeymap,
           ...historyKeymap,
+          ...searchKeymap,
         ]),
         // Selection popup (the code and markdown editors): a non-empty
         // selection anchors the floating "add to conversation" button above
@@ -239,6 +268,15 @@ export function TextEditor(props: FileViewerProps) {
       savingRef.current = false
       setSaveState('failed')
     })
+  }
+
+  /** Open (or refocus) CodeMirror's find-in-file panel. The toolbar's find
+   *  button and the Ctrl/Cmd+F keymap both land here — `openSearchPanel`
+   *  opens a closed panel and focuses/selects the query field when open. */
+  const openSearch = (): void => {
+    const view = viewRef.current
+    if (view === null) return
+    openSearchPanel(view)
   }
 
   const markdown = viewerId === 'markdown'
@@ -342,9 +380,10 @@ export function TextEditor(props: FileViewerProps) {
   })
   useEffect(() => {
     if (!hostToolbar) return
-    // `save` reads live refs only, and `setMode` is the stable state setter —
-    // registering this render's closures is safe for the mount's lifetime.
-    props.onToolbarControls?.({ setMode, save })
+    // `save`/`openSearch` read live refs only, and `setMode` is the stable
+    // state setter — registering this render's closures is safe for the
+    // mount's lifetime.
+    props.onToolbarControls?.({ setMode, save, openSearch })
     return () => { props.onToolbarControls?.(null) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostToolbar])
@@ -381,6 +420,17 @@ export function TextEditor(props: FileViewerProps) {
             onClick={save}
           >
             <IconCheckOutline16 />
+          </button>
+        )}
+        {editable && (
+          <button
+            type="button"
+            className={css.iconButton}
+            aria-label={t('find')}
+            title={`${t('find')} (Ctrl/Cmd+F)`}
+            onClick={openSearch}
+          >
+            <IconSearchOutline16 />
           </button>
         )}
         {saveLabel !== '' && <span className={clsx(css.editorStatus, saveState === 'failed' && css.editorStatusError)}>{saveLabel}</span>}

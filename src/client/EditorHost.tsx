@@ -25,7 +25,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createElement } from 'react'
 import clsx from 'clsx'
-import { IconCheckOutline16, IconFolderOpen16, IconRefreshOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCheckOutline16, IconFolderOpen16, IconRefreshOutline14, IconSearchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context } from '../context-types.ts'
 import { api, mediaUrl, type SessionScope } from './api.ts'
 import { BinaryDownload } from './binary-download.tsx'
@@ -432,6 +432,17 @@ export function EditorHost(props: {
             onClick={() => { controlsRef.current?.save() }}
           >
             <IconCheckOutline16 size={14} />
+          </button>
+        )}
+        {toolbar?.editable === true && (
+          <button
+            type="button"
+            className={css.iconButton}
+            aria-label={t('find')}
+            title={`${t('find')} (Ctrl/Cmd+F)`}
+            onClick={() => { controlsRef.current?.openSearch?.() }}
+          >
+            <IconSearchOutline16 size={14} />
           </button>
         )}
         {saveLabel !== '' && (
