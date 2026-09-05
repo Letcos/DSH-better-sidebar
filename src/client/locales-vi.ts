@@ -165,6 +165,7 @@ export const vi: Record<string, string> = {
   hiddenFiles: 'Tệp ẩn',
   parent: 'Thư mục cha',
   copied: 'Đã sao chép',
+  footnotes: 'Chú thích',
   copy: 'Sao chép',
   newFile: 'Tệp mới',
   openEditor: 'Mở trình soạn thảo',

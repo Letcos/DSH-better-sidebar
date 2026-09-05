@@ -165,6 +165,7 @@ export const ja: Record<string, string> = {
   hiddenFiles: '隠しファイル',
   parent: '上位ディレクトリ',
   copied: 'コピーしました',
+  footnotes: '脚注',
   copy: 'コピー',
   newFile: '新規ファイル',
   openEditor: 'エディターで開く',

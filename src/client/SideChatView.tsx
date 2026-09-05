@@ -104,6 +104,7 @@ interface RowLabels {
   copiedLabel: string
   thinkLabel: string
   injectionLabel: string
+  markdownLabels: { code: { copyLabel: string; copiedLabel: string }; footnotes: string }
 }
 
 /** Merge history entries by event seq (newest wins), log order preserved. */
@@ -186,13 +187,13 @@ function renderRow(row: SidechatTranscriptRow, labels: RowLabels): React.ReactNo
     case 'user':
       return (
         <div key={`${row.kind}:${row.seq}`} className={css.sidechatUser}>
-          <MarkdownText text={row.text} codeLabels={labels} />
+          <MarkdownText text={row.text} labels={labels.markdownLabels} />
         </div>
       )
     case 'assistant':
       return (
         <div key={`${row.kind}:${row.seq}`} className={css.sidechatAssistant}>
-          <MarkdownText text={row.text} codeLabels={labels} />
+          <MarkdownText text={row.text} labels={labels.markdownLabels} />
         </div>
       )
     case 'reasoning':
@@ -242,12 +243,16 @@ export function SideChatView(props: {
 }): React.ReactNode {
   const { ctx, scope, tab, visible } = props
   const rowLabels = useMemo<RowLabels>(
-    () => ({
-      copyLabel: t('copy'),
-      copiedLabel: t('copied'),
-      thinkLabel: t('sideChatThink'),
-      injectionLabel: t('sideChatInjection'),
-    }),
+    () => {
+      const code = { copyLabel: t('copy'), copiedLabel: t('copied') }
+      return {
+        copyLabel: code.copyLabel,
+        copiedLabel: code.copiedLabel,
+        thinkLabel: t('sideChatThink'),
+        injectionLabel: t('sideChatInjection'),
+        markdownLabels: { code, footnotes: t('footnotes') },
+      }
+    },
     [],
   )
 

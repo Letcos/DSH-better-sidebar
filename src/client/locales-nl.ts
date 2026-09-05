@@ -163,6 +163,7 @@ export const nl: Record<string, string> = {
   hiddenFiles: 'Verborgen bestanden',
   parent: 'Bovenliggende map',
   copied: 'Gekopieerd',
+  footnotes: 'Voetnoten',
   copy: 'Kopiëren',
   newFile: 'Nieuw bestand',
   openEditor: 'Editor openen',

@@ -165,6 +165,7 @@ export const th: Record<string, string> = {
   hiddenFiles: 'ไฟล์ที่ซ่อนอยู่',
   parent: 'ไดเรกทอรีหลัก',
   copied: 'คัดลอกแล้ว',
+  footnotes: 'เชิงอรรถ',
   copy: 'คัดลอก',
   newFile: 'ไฟล์ใหม่',
   openEditor: 'เปิดตัวแก้ไข',

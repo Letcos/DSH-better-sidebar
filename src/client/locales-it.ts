@@ -156,6 +156,7 @@ export const it: Record<string, string> = {
   hiddenFiles: 'File nascosti',
   parent: 'Directory superiore',
   copied: 'Copiato',
+  footnotes: 'Note a piè di pagina',
   copy: 'Copia',
   newFile: 'Nuovo file',
   openEditor: 'Apri editor',

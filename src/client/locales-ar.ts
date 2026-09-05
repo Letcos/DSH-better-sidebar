@@ -166,6 +166,7 @@ export const ar: Record<string, string> = {
   hiddenFiles: 'ملفات مخفية',
   parent: 'الدليل الأصل',
   copied: 'تم النسخ',
+  footnotes: 'الحواشي السفلية',
   copy: 'نسخ',
   newFile: 'ملف جديد',
   openEditor: 'فتح المحرّر',

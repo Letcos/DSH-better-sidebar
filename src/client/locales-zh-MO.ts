@@ -180,6 +180,7 @@ export const zhMO: Record<string, string> = {
   hiddenFiles: '隱藏檔案',
   parent: '上層目錄',
   copied: '已複製',
+  footnotes: '腳註',
   copy: '複製',
   newFile: '新檔案',
   openEditor: '開啟編輯器',

@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { buildSidechatApi } from '../src/sidechat-routes.ts'
 import { SidebarError } from '../src/wire.ts'
 import { SIDE_BOUNDARY_PROMPT, SIDE_INJECTION_PLUGIN, SIDE_NEW_THREAD_TITLE, sideLabel } from '../src/sidechat-core.ts'
+import { SUBAGENT_DESCRIPTOR_VERSION } from '@deepseek-ai/dsh-subagent'
 import type { Context } from '../src/context-types.ts'
 
 /** A fake live agent (inject/followup/cancel spied). */
@@ -21,6 +22,7 @@ function agent(id: string, over: { events?: unknown[]; header?: Record<string, u
       id,
       header: { cwd: '/p', delegationDepth: 0, agentPreset: 'preset-a', ...over.header },
       events: over.events ?? [],
+      snapshotEvents: () => over.events ?? [],
     },
     inject: vi.fn(),
     followup: vi.fn(),
@@ -117,7 +119,7 @@ describe('sidechat.start', () => {
     expect(options.meta).toMatchObject({
       parentSession: 'parent',
       origin: 'subagent',
-      seedLength: 7,
+      isSeeded: true,
       delegationDepth: 1,
       agentPreset: 'preset-a',
       cwd: '/p',
@@ -132,7 +134,7 @@ describe('sidechat.start', () => {
       'subagent/descriptor',
     ])
     expect(options.seed.at(-1)?.data).toMatchObject({
-      version: 2,
+      version: SUBAGENT_DESCRIPTOR_VERSION,
       mode: 'continuable',
       provider: 'sidechat',
       label: sideLabel('explain the event flow'),

@@ -165,6 +165,7 @@ export const tr: Record<string, string> = {
   hiddenFiles: 'Gizli dosyalar',
   parent: 'Üst dizin',
   copied: 'Kopyalandı',
+  footnotes: 'Dipnotlar',
   copy: 'Kopyala',
   newFile: 'Yeni dosya',
   openEditor: 'Düzenleyiciyi aç',

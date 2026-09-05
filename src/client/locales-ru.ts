@@ -161,6 +161,7 @@ export const ru: Record<string, string> = {
   hiddenFiles: 'Скрытые файлы',
   parent: 'Родительский каталог',
   copied: 'Скопировано',
+  footnotes: 'Сноски',
   copy: 'Копировать',
   newFile: 'Новый файл',
   openEditor: 'Открыть редактор',

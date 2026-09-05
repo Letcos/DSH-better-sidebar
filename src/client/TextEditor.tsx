@@ -472,7 +472,7 @@ export function TextEditor(props: FileViewerProps) {
             ? <MarkdownDocument info={htmlInfo} media={htmlMedia} codeLabels={codeLabels} />
             : hasMermaid
               ? <LazyMermaidMarkdown text={previewText} codeLabels={codeLabels} />
-              : <MarkdownText text={previewText} codeLabels={codeLabels} />}
+              : <MarkdownText text={previewText} labels={{ code: codeLabels, footnotes: t('footnotes') }} />}
         </div>
       )}
       {html && mode === 'preview' && (

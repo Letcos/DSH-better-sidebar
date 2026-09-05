@@ -148,6 +148,7 @@ export const pt: Record<string, string> = {
   hiddenFiles: 'Arquivos ocultos',
   parent: 'Diretório pai',
   copied: 'Copiado',
+  footnotes: 'Notas de rodapé',
   copy: 'Copiar',
   newFile: 'Novo arquivo',
   openEditor: 'Abrir editor',

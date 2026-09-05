@@ -694,7 +694,6 @@ ctx.effect(() =>
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "dsh-better-sidebar": "workspace:*",
-    "@deepseek-ai/dsh-client-runtime": "^0.0.1",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {

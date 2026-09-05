@@ -165,6 +165,7 @@ export const hi: Record<string, string> = {
   hiddenFiles: 'छिपी फ़ाइलें',
   parent: 'मूल डायरेक्टरी',
   copied: 'कॉपी हो गया',
+  footnotes: 'फ़ुटनोट',
   copy: 'कॉपी',
   newFile: 'नई फ़ाइल',
   openEditor: 'एडिटर खोलें',

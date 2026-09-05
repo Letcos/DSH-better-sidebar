@@ -157,6 +157,7 @@ export const ko: Record<string, string> = {
   hiddenFiles: '숨김 파일',
   parent: '상위 디렉터리',
   copied: '복사됨',
+  footnotes: '각주',
   copy: '복사',
   newFile: '새 파일',
   openEditor: '편집기 열기',

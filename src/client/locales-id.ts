@@ -163,6 +163,7 @@ export const id: Record<string, string> = {
   hiddenFiles: 'Berkas tersembunyi',
   parent: 'Direktori induk',
   copied: 'Tersalin',
+  footnotes: 'Catatan kaki',
   copy: 'Salin',
   newFile: 'Berkas baru',
   openEditor: 'Buka editor',

@@ -167,6 +167,7 @@ export const pl: Record<string, string> = {
   hiddenFiles: 'Ukryte pliki',
   parent: 'Katalog nadrzędny',
   copied: 'Skopiowano',
+  footnotes: 'Przypisy',
   copy: 'Kopiuj',
   newFile: 'Nowy plik',
   openEditor: 'Otwórz edytor',

@@ -148,6 +148,7 @@ export const sv: Record<string, string> = {
   hiddenFiles: 'Dolda filer',
   parent: 'Överordnad katalog',
   copied: 'Kopierades',
+  footnotes: 'Fotnoter',
   copy: 'Kopiera',
   newFile: 'Ny fil',
   openEditor: 'Öppna editor',
