@@ -391,14 +391,30 @@ export async function fileFormatOf(path: string): Promise<FileFormat> {
     const truncated = info.size > ENCODING_SNIFF_LIMIT
     const bytes = Buffer.alloc(Math.min(info.size, ENCODING_SNIFF_LIMIT))
     const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0)
-    const decoded = decodeTextBytes(bytes.subarray(0, bytesRead), truncated)
-    return {
-      encoding: decoded?.encoding ?? 'utf8',
-      // A binary read has no line structure to preserve; the editor cannot be
-      // showing one anyway (it falls back to the download pane).
-      eol: decoded === null ? 'lf' : detectEol(decoded.content),
-    }
+    return formatOfBytes(bytes.subarray(0, bytesRead), truncated)
   } finally {
     await handle.close()
+  }
+}
+
+/**
+ * The byte encoding and line ending of an already-read sniff window.
+ *
+ * Split out of {@link fileFormatOf} so a REMOTE save (whose bytes arrive over
+ * SFTP rather than from a local handle) can derive the same format from the
+ * buffer it had to fetch anyway — the two paths must agree, or the same file
+ * would keep its encoding locally and be rewritten as UTF-8 remotely.
+ * @param bytes - the leading bytes of the file (its sniff window).
+ * @param truncated - whether the window was cut short by the sniff limit; a
+ *  torn multi-byte character at the end must not be read as a different encoding.
+ * @returns the detected format; a binary buffer yields UTF-8 + LF.
+ */
+export function formatOfBytes(bytes: Buffer, truncated = false): FileFormat {
+  const decoded = decodeTextBytes(bytes, truncated)
+  return {
+    encoding: decoded?.encoding ?? 'utf8',
+    // A binary read has no line structure to preserve; the editor cannot be
+    // showing one anyway (it falls back to the download pane).
+    eol: decoded === null ? 'lf' : detectEol(decoded.content),
   }
 }

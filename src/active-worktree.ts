@@ -26,6 +26,7 @@ import type { Context, SidebarSessionEvent } from './context-types.ts'
 import { requireAbsolute } from './fs-tree.ts'
 import { runGitRaw } from './git.ts'
 import { readPersistedSessionOf } from './session-store.ts'
+import { routeByCwd } from './ssh-remote.ts'
 
 /** How long one computed root is reused before the event log is scanned again. */
 const ACTIVE_ROOT_TTL_MS = 3_000
@@ -244,6 +245,13 @@ async function sessionEventsOf(ctx: Context, sessionId: string): Promise<readonl
  */
 export async function activeWorktreeRootOf(ctx: Context, sessionId: string, base: string): Promise<string> {
   if (base === '') return base
+  // A remote workspace (dsh-ssh placeholder) has NO local repository to follow:
+  // the placeholder is an empty directory, so every probe below would spawn a
+  // doomed `git -C <placeholder> rev-parse` on the DSH host — once per route
+  // call — and always fall back to `base` anyway. The linked-worktree feature
+  // is a local-workspace concern; a remote session keeps its placeholder root,
+  // and the REMOTE side's own worktrees are resolved by the git routes.
+  if (routeByCwd(base).kind === 'remote') return base
   const override = (process.env[ACTIVE_ROOT_OVERRIDE_ENV] ?? '').trim()
   if (override !== '' && isAbsolute(override)) return requireAbsolute(override)
   // The cache is consulted BEFORE the probe: doing it afterwards still pays the

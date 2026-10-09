@@ -31,7 +31,7 @@ import {
 } from './config.ts'
 import { invalidateDirectoryCache, listDirectory, messageOf, parentOf, requireAbsolute, rootLabel, type SidebarFsEntry } from './fs-tree.ts'
 import { resolveSessionPath } from './session-path.ts'
-import { createWorkspaceFile, mkdirWorkspaceEntry, renameWorkspaceEntry, removeWorkspaceEntry, writeWorkspaceUpload } from './fs-operations.ts'
+import { createWorkspaceFile, createRemoteFile, mkdirRemoteEntry, mkdirWorkspaceEntry, renameRemoteEntry, renameWorkspaceEntry, removeRemoteEntry, removeWorkspaceEntry, writeWorkspaceUpload } from './fs-operations.ts'
 import { ensureWorkspacePath, ensureWorkspaceWritePath } from './path-security.ts'
 import { searchFiles } from './fs-search.ts'
 import { compileExcludePatterns } from './exclude-patterns.ts'
@@ -43,6 +43,29 @@ import { launchExternal } from './open-external.ts'
 import { archiveNameOf, collectZipEntries, createArchiveTasks, disambiguateArchiveNames, respondArchiveDownload, type ArchiveTasks } from './archive-route.ts'
 import type { ZipEntry } from './zip.ts'
 import * as git from './git.ts'
+import {
+  isRemoteAbsolute,
+  localRemotePath,
+  remoteDisplayLabel,
+  remoteListDirectory,
+  remoteReadBytes,
+  remoteReadText,
+  remoteRemove,
+  remoteRename,
+  remoteSearch,
+  remoteStat,
+  remoteToLocal,
+  remoteUpload,
+  remoteWriteFile,
+  resolveRemotePath,
+  resolveRemoteTarget,
+  routeByCwd,
+  withRemoteConn,
+  type RemoteConn,
+  type RemoteRoute,
+} from './ssh-remote.ts'
+import { posix } from 'node:path'
+import * as gitRemote from './git-remote.ts'
 import { SettingsConflictError } from '@deepseek-ai/dsh-settings'
 import { AgentOpenRegistry, registerOpenTool, type AgentOpenRequest } from './agent-opens.ts'
 import { buildSubagentLiveApi, type SidebarSubagentLiveRoutes } from './subagent-live-route.ts'
@@ -70,7 +93,7 @@ import {
 // row bound, so it lives in a dependency-free module both can import.
 import { FS_TREES_MAX_PATHS } from './fs-batch.ts'
 import { activeWorktreeRootOf } from './active-worktree.ts'
-import { decodeTextBytes, encodeText, fileFormatOf, restoreEol } from './text-encoding.ts'
+import { decodeTextBytes, encodeText, fileFormatOf, formatOfBytes, restoreEol } from './text-encoding.ts'
 
 export { Config }
 export type { SidebarConfig, ResolvedSidebarConfig }
@@ -181,6 +204,30 @@ function selectedRepoOf(payload: unknown): string | undefined {
   return requireAbsolute(requireString(payload, 'repoRoot'))
 }
 
+/**
+ * Run `remote` when `cwd` is a dsh-ssh remote placeholder, else `local`.
+ *
+ * One dispatch point for every workspace-facing route: the remote branch is
+ * entered ONLY when dsh-ssh is loaded and the session cwd decodes as a
+ * placeholder path, so a local workspace keeps its existing code path
+ * byte-for-byte (the local closure is not even invoked differently — it is
+ * simply the else branch of a routing decision made once per request).
+ *
+ * The remote callback receives the pooled connection plus the resolved route
+ * (hostId / remoteCwd / placeholderCwd); the path translation helpers on
+ * `ssh-remote.ts` convert between the two worlds.
+ */
+async function withWorkspace<T>(
+  ctx: Context,
+  cwd: string,
+  remote: (conn: RemoteConn, route: RemoteRoute) => Promise<T>,
+  local: () => Promise<T>,
+): Promise<T> {
+  const routed = await withRemoteConn(ctx, cwd, remote)
+  if (routed !== null) return routed
+  return local()
+}
+
 /** One required 1-based line number of a `git blame -L` request. */
 function requireLineNumber(payload: unknown, key: string): number {
   const value = (payload as Record<string, unknown> | null)?.[key]
@@ -197,6 +244,10 @@ function requireLineNumber(payload: unknown, key: string): number {
  * existing path, with the repository root as the fallback. Git's
  * status/diff ROWS deliberately do NOT come through here — they are
  * repository-root-relative by construction, see {@link resolveStatusPath}.
+ *
+ * LOCAL ONLY. A remote workspace resolves its paths with
+ * `resolveRemotePath` (ssh-remote.ts) instead: this function is built on the
+ * Windows-aware local primitives, which would drive-root a POSIX path.
  */
 async function resolveGitPath(cwd: string, raw: string, selected?: string): Promise<string> {
   if (isAbsolute(raw)) return requireAbsolute(resolveSessionPath(cwd, raw))
@@ -491,8 +542,24 @@ function buildApi(
     // A container workspace is not itself a repository. Validate the checkout
     // against the selected child (or the default discovered repository), just
     // as the inventory does, before accepting the requested worktree path.
-    const root = await git.repoRoot(base.cwd, selectedRepoOf(payload))
-    return { sessionId: base.sessionId, cwd: await git.resolveWorktree(root, requested) }
+    // The lookup rides the SAME remote/local dispatch as every other git
+    // route: resolving it locally against a remote placeholder fails with
+    // "not a git repository" (the placeholder holds no repository).
+    const selected = selectedRepoOf(payload)
+    return withWorkspace(
+      ctx,
+      base.cwd,
+      async (conn, route) => {
+        const remoteBase = localRemotePath(base.cwd, route)
+        const root = await gitRemote.remoteRepoRoot(conn, remoteBase).catch(() => remoteBase)
+        const resolved = await gitRemote.remoteResolveWorktree(conn, root, requested)
+        return { sessionId: base.sessionId, cwd: remoteToLocal(resolved, route) }
+      },
+      async () => {
+        const root = await git.repoRoot(base.cwd, selected)
+        return { sessionId: base.sessionId, cwd: await git.resolveWorktree(root, requested) }
+      },
+    )
   }
   // Subagent live previews: one batch request instead of N per-child
   // `subagents.history` calls. The route degrades to a 503 when the host
@@ -524,7 +591,12 @@ function buildApi(
     },
     'session.cwd': async (payload) => {
       const { sessionId, cwd } = await cwdOf(payload)
-      return { sessionId, cwd, root: rootLabel(cwd), parent: parentOf(cwd) ?? null }
+      // A remote placeholder cwd's basename is an unreadable base64 segment;
+      // the readable label is `<host display name> / <remote basename>`
+      // (mirror of dsh-ssh's placeholderWorkspaceTitle). A local cwd keeps
+      // `rootLabel` byte-for-byte.
+      const remoteRoot = remoteDisplayLabel(ctx, cwd)
+      return { sessionId, cwd, root: remoteRoot ?? rootLabel(cwd), parent: parentOf(cwd) ?? null }
     },
     'fs.tree': async (payload) => {
       const { cwd } = await cwdOf(payload)
@@ -533,7 +605,12 @@ function buildApi(
       // The client's explorerExclude pref rides the request (compiled here so
       // the listing and the singleton fold probe share one matcher).
       const exclude = compileExcludePatterns(record.exclude, cwd)
-      return listDirectory(target, resolved.listLimit, exclude)
+      return withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => remoteListDirectory(conn, localRemotePath(target, route), route, resolved.listLimit),
+        () => listDirectory(target, resolved.listLimit, exclude),
+      )
     },
     // Batch listing: one request for every level the tree has expanded, so a
     // mount/refresh costs one round trip instead of N. Each path rides the
@@ -563,7 +640,13 @@ function buildApi(
         const homeRelative = raw === '~' || raw.startsWith('~/') || raw.startsWith('~\\')
         const requested = isAbsolute(raw) || homeRelative ? raw : `${cwd}${sep}${raw}`
         try {
-          return await listDirectory(await ensureWorkspacePath(cwd, requested), resolved.listLimit, exclude)
+          const target = await ensureWorkspacePath(cwd, requested)
+          return await withWorkspace(
+            ctx,
+            cwd,
+            (conn, route) => remoteListDirectory(conn, localRemotePath(target, route), route, resolved.listLimit),
+            () => listDirectory(target, resolved.listLimit, exclude),
+          )
         } catch (error) {
           // Per-level failure: the batch itself stays a success (one unreadable
           // directory must not blank the whole tree).
@@ -583,7 +666,21 @@ function buildApi(
       const { cwd } = await cwdOf(payload)
       const record = payload as { exclude?: unknown }
       const query = requireString(payload, 'query')
-      return searchFiles(cwd, query, { exclude: compileExcludePatterns(record.exclude, cwd) })
+      return withWorkspace(
+        ctx,
+        cwd,
+        async (conn, route) => {
+          const result = await remoteSearch(conn, route.remoteCwd, query)
+          // Remote matches are remote-root-relative; express them under the
+          // placeholder so the client's tree navigation lands in this session.
+          return {
+            matches: result.matches.map((rel) => remoteToLocal(posix.join(route.remoteCwd, rel), route)),
+            dirs: result.dirs.map((rel) => remoteToLocal(posix.join(route.remoteCwd, rel), route)),
+            truncated: result.truncated,
+          }
+        },
+        () => searchFiles(cwd, query, { exclude: compileExcludePatterns(record.exclude, cwd) }),
+      )
     },
     'fs.read': async (payload) => {
       const { cwd } = await cwdOf(payload)
@@ -592,8 +689,16 @@ function buildApi(
       // child-repo path is relative to the selected repoRoot, not the session
       // cwd; thread it so the path resolves inside the authorized workspace.
       const selected = selectedRepoOf(payload)
-      const path = await ensureWorkspacePath(cwd, await resolveGitPath(cwd, requireString(payload, 'path'), selected))
-      const { content, truncated, binary, size, mtimeMs, head } = await readText(path, resolved.readLimit)
+      const raw = requireString(payload, 'path')
+      const { content, truncated, binary, size, mtimeMs, head } = await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => remoteReadText(conn, resolveRemotePath(raw, route), resolved.readLimit),
+        async () => {
+          const path = await ensureWorkspacePath(cwd, await resolveGitPath(cwd, raw, selected))
+          return readText(path, resolved.readLimit)
+        },
+      )
       if (binary) return { kind: 'binary', size, truncated, mtimeMs, head }
       return { kind: 'text', content, truncated, mtimeMs }
     },
@@ -601,13 +706,6 @@ function buildApi(
       const { cwd } = await cwdOf(payload)
       const path = await ensureWorkspaceWritePath(cwd, requireString(payload, 'path'))
       const content = requireString(payload, 'content')
-      // Detect the byte encoding AND the line ending BEFORE the temp write, so
-      // the save round-trips what the file already used: GBK / UTF-16 / BOM'd
-      // UTF-8 stay put, and a CRLF file stays CRLF. The second half matters
-      // because the editor transports an LF document (CodeMirror has no other
-      // line model), so writing it verbatim turns one edited line into a
-      // whole-file diff for every Windows checkout (#871).
-      const { encoding, eol } = await fileFormatOf(path)
       // Optimistic concurrency: the client sends the mtime its draft was based
       // on; a file that changed on disk since (the model wrote it, another tab
       // saved, an external editor touched it) refuses the write instead of
@@ -616,54 +714,95 @@ function buildApi(
       const expected = typeof record?.expectedMtimeMs === 'number' && Number.isFinite(record.expectedMtimeMs)
         ? record.expectedMtimeMs
         : undefined
-      if (expected !== undefined) {
-        const current = await stat(path).then(info => info.mtimeMs).catch(() => undefined)
-        if (current !== undefined && current !== expected) {
-          throw new SidebarError(
-            'fs-conflict',
-            `"${path}" changed on disk since it was loaded (expected mtime ${expected}, found ${current})`,
-            409,
-          )
-        }
-      }
-      // Per-request temp name (same pattern as writeWorkspaceUpload): a
-      // pid-suffixed name is shared by every concurrent save to the same
-      // path, letting two writers interleave into one temp file — and the
-      // failure-path rm could delete the other writer's in-flight temp.
-      const tmp = join(dirname(path), `.${basename(path)}.dsh-sidebar-tmp-${randomUUID()}.tmp`)
-      try {
-        await mkdir(dirname(path), { recursive: true })
-        await writeFile(tmp, encodeText(restoreEol(content, eol), encoding), { flag: 'wx' })
-        await rename(tmp, path)
-      } catch (error) {
-        await rm(tmp, { force: true }).catch(() => {})
-        throw new SidebarError('fs-error', `cannot write "${path}": ${error instanceof Error ? error.message : String(error)}`, 400)
-      }
-      invalidateDirectoryCache(dirname(path))
-      // The fresh baseline the client adopts after a successful save.
-      const mtimeMs = await stat(path).then(info => info.mtimeMs).catch(() => undefined)
-      return { ok: true, ...(mtimeMs !== undefined ? { mtimeMs } : {}) }
+      return withWorkspace(
+        ctx,
+        cwd,
+        async (conn, route) => {
+          const remotePath = localRemotePath(path, route)
+          // The existing bytes drive BOTH the conflict gate and the encoding /
+          // line-ending detection, so one read answers both (a missing file is
+          // a fresh create: no gate, default format).
+          const existing = await remoteReadBytes(conn, remotePath, resolved.readLimit).catch(() => undefined)
+          const currentMtimeMs = await remoteStat(conn, remotePath).then(info => info?.mtimeMs).catch(() => undefined)
+          if (expected !== undefined && currentMtimeMs !== undefined && currentMtimeMs !== expected) {
+            throw new SidebarError(
+              'fs-conflict',
+              `"${path}" changed on disk since it was loaded (expected mtime ${expected}, found ${currentMtimeMs})`,
+              409,
+            )
+          }
+          // A missing file is a fresh create: no sniff bytes, so the default
+          // format applies (mirror of fileFormatOf's ENOENT branch).
+          const { encoding, eol } = existing === undefined ? { encoding: 'utf8' as const, eol: 'lf' as const } : formatOfBytes(existing)
+          await remoteWriteFile(conn, remotePath, encodeText(restoreEol(content, eol), encoding))
+          invalidateDirectoryCache(dirname(path))
+          const mtimeMs = await remoteStat(conn, remotePath).then(info => info?.mtimeMs).catch(() => undefined)
+          return { ok: true, ...(mtimeMs !== undefined ? { mtimeMs } : {}) }
+        },
+        async () => {
+          // Detect the byte encoding AND the line ending BEFORE the temp write, so
+          // the save round-trips what the file already used: GBK / UTF-16 / BOM'd
+          // UTF-8 stay put, and a CRLF file stays CRLF. The second half matters
+          // because the editor transports an LF document (CodeMirror has no other
+          // line model), so writing it verbatim turns one edited line into a
+          // whole-file diff for every Windows checkout (#871).
+          const { encoding, eol } = await fileFormatOf(path)
+          if (expected !== undefined) {
+            const current = await stat(path).then(info => info.mtimeMs).catch(() => undefined)
+            if (current !== undefined && current !== expected) {
+              throw new SidebarError(
+                'fs-conflict',
+                `"${path}" changed on disk since it was loaded (expected mtime ${expected}, found ${current})`,
+                409,
+              )
+            }
+          }
+          // Per-request temp name (same pattern as writeWorkspaceUpload): a
+          // pid-suffixed name is shared by every concurrent save to the same
+          // path, letting two writers interleave into one temp file — and the
+          // failure-path rm could delete the other writer's in-flight temp.
+          const tmp = join(dirname(path), `.${basename(path)}.dsh-sidebar-tmp-${randomUUID()}.tmp`)
+          try {
+            await mkdir(dirname(path), { recursive: true })
+            await writeFile(tmp, encodeText(restoreEol(content, eol), encoding), { flag: 'wx' })
+            await rename(tmp, path)
+          } catch (error) {
+            await rm(tmp, { force: true }).catch(() => {})
+            throw new SidebarError('fs-error', `cannot write "${path}": ${error instanceof Error ? error.message : String(error)}`, 400)
+          }
+          invalidateDirectoryCache(dirname(path))
+          // The fresh baseline the client adopts after a successful save.
+          const mtimeMs = await stat(path).then(info => info.mtimeMs).catch(() => undefined)
+          return { ok: true, ...(mtimeMs !== undefined ? { mtimeMs } : {}) }
+        },
+      )
     },
     // The tree row's rename: single-segment name, destination-existence and
     // workspace-root refusals, link-aware (renames the row, not its target).
     // fs-operations.ts owns the containment and shape rules.
     'fs.rename': async (payload) => {
       const { cwd } = await cwdOf(payload)
-      return renameWorkspaceEntry({
+      const path = requireString(payload, 'path')
+      const name = requireString(payload, 'name')
+      return withWorkspace(
+        ctx,
         cwd,
-        path: requireString(payload, 'path'),
-        name: requireString(payload, 'name'),
-      })
+        (conn, route) => renameRemoteEntry(conn, route, resolveRemoteTarget(cwd, route, path), name),
+        () => renameWorkspaceEntry({ cwd, path, name }),
+      )
     },
     // The tree's "new folder": one directory inside an existing row, with
     // the same single-segment/existence rules as rename.
     'fs.mkdir': async (payload) => {
       const { cwd } = await cwdOf(payload)
-      return mkdirWorkspaceEntry({
+      const path = requireString(payload, 'path')
+      const name = requireString(payload, 'name')
+      return withWorkspace(
+        ctx,
         cwd,
-        path: requireString(payload, 'path'),
-        name: requireString(payload, 'name'),
-      })
+        (conn, route) => mkdirRemoteEntry(conn, route, resolveRemoteTarget(cwd, route, path), name),
+        () => mkdirWorkspaceEntry({ cwd, path, name }),
+      )
     },
     // The tree's "new file": one EMPTY file inside an existing row. Same
     // single-segment/existence rules as mkdir, plus the Windows-illegal and
@@ -671,20 +810,26 @@ function buildApi(
     // owns both), and a destination that is never truncated.
     'fs.createFile': async (payload) => {
       const { cwd } = await cwdOf(payload)
-      return createWorkspaceFile({
+      const path = requireString(payload, 'path')
+      const name = requireString(payload, 'name')
+      return withWorkspace(
+        ctx,
         cwd,
-        path: requireString(payload, 'path'),
-        name: requireString(payload, 'name'),
-      })
+        (conn, route) => createRemoteFile(conn, route, resolveRemoteTarget(cwd, route, path), name),
+        () => createWorkspaceFile({ cwd, path, name }),
+      )
     },
     // The tree row's delete (permanent — the host has no trash): recursive
     // for directories, unlinks a symlink row without touching its target.
     'fs.remove': async (payload) => {
       const { cwd } = await cwdOf(payload)
-      return removeWorkspaceEntry({
+      const path = requireString(payload, 'path')
+      return withWorkspace(
+        ctx,
         cwd,
-        path: requireString(payload, 'path'),
-      })
+        (conn, route) => removeRemoteEntry(conn, route, resolveRemoteTarget(cwd, route, path)),
+        () => removeWorkspaceEntry({ cwd, path }),
+      )
     },
     'git.worktrees': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
@@ -692,19 +837,52 @@ function buildApi(
       // A workspace container (no repo at cwd) has child repos; the worktree
       // list belongs to the SELECTED child, not the container. Thread the
       // validated repoRoot so linked checkouts of a chosen child appear.
-      const base = selected !== undefined ? await git.repoRoot(cwd, selected).catch(() => cwd) : cwd
-      return git.worktrees(base)
+      return withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteWorktrees(conn, localRemotePath(cwd, route)),
+        async () => {
+          const base = selected !== undefined ? await git.repoRoot(cwd, selected).catch(() => cwd) : cwd
+          return git.worktrees(base)
+        },
+      )
     },
     'git.status': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      return git.status(cwd, selectedRepoOf(payload))
+      return withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteStatus(conn, localRemotePath(cwd, route)),
+        () => git.status(cwd, selectedRepoOf(payload)),
+      )
     },
     'git.diff': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const record = payload as { path?: unknown; staged?: unknown }
       const repoRoot = selectedRepoOf(payload)
-      const path = record.path === undefined ? undefined : await resolveStatusPath(cwd, requireString(payload, 'path'), repoRoot)
-      return { diff: await git.diff(cwd, path, record.staged === true, repoRoot) }
+      const raw = record.path === undefined ? undefined : requireString(payload, 'path')
+      return {
+        diff: await withWorkspace(
+          ctx,
+          cwd,
+          async (conn, route) => {
+            const remoteCwd = localRemotePath(cwd, route)
+            // A repo-relative name (what `git status` reports) is addressed
+            // against the REMOTE repository root, so the remote git resolves
+            // exactly the file the status row named. An absolute path needs no
+            // lookup at all.
+            let path: string | undefined
+            if (raw !== undefined) {
+              path = isRemoteAbsolute(raw) ? resolveRemotePath(raw, route) : raw
+            }
+            return gitRemote.remoteDiff(conn, remoteCwd, path, record.staged === true)
+          },
+          async () => {
+            const path = raw === undefined ? undefined : await resolveStatusPath(cwd, raw, repoRoot)
+            return git.diff(cwd, path, record.staged === true, repoRoot)
+          },
+        ),
+      }
     },
     // The editor's change gutter asks for the WHOLE uncommitted change of one
     // file (worktree against HEAD, staged and unstaged together) — the two
@@ -713,21 +891,47 @@ function buildApi(
     'git.diff-head': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const repoRoot = selectedRepoOf(payload)
-      const path = await ensureWorkspacePath(cwd, await resolveGitPath(cwd, requireString(payload, 'path'), repoRoot))
-      return { diff: await git.diffHead(cwd, path, repoRoot) }
+      const raw = requireString(payload, 'path')
+      return {
+        diff: await withWorkspace(
+          ctx,
+          cwd,
+          async (conn, route) => {
+            // Resolved ENTIRELY in remote space: `resolveRemotePath` never
+            // touches a Windows path API, so a remote-absolute `raw` cannot be
+            // drive-rooted and doubled (see its doc comment).
+            const path = resolveRemotePath(raw, route)
+            return gitRemote.remoteDiffHead(conn, localRemotePath(cwd, route), path)
+          },
+          async () => {
+            const path = await ensureWorkspacePath(cwd, await resolveGitPath(cwd, raw, repoRoot))
+            return git.diffHead(cwd, path, repoRoot)
+          },
+        ),
+      }
     },
     'git.stage': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const record = payload as { path?: unknown }
       const path = record.path === undefined ? undefined : requireString(payload, 'path')
-      await git.stage(cwd, path, selectedRepoOf(payload))
+      await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteStage(conn, localRemotePath(cwd, route), path),
+        () => git.stage(cwd, path, selectedRepoOf(payload)),
+      )
       return { ok: true }
     },
     'git.unstage': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const record = payload as { path?: unknown }
       const path = record.path === undefined ? undefined : requireString(payload, 'path')
-      await git.unstage(cwd, path, selectedRepoOf(payload))
+      await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteUnstage(conn, localRemotePath(cwd, route), path),
+        () => git.unstage(cwd, path, selectedRepoOf(payload)),
+      )
       return { ok: true }
     },
     'git.commit': async (payload) => {
@@ -742,21 +946,42 @@ function buildApi(
     // branch (pull is --ff-only) is the user's to resolve in a terminal.
     'git.push': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      await git.push(cwd, selectedRepoOf(payload))
+      await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remotePush(conn, localRemotePath(cwd, route)),
+        () => git.push(cwd, selectedRepoOf(payload)),
+      )
       return { ok: true }
     },
     'git.pull': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      await git.pull(cwd, selectedRepoOf(payload))
+      await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remotePull(conn, localRemotePath(cwd, route)),
+        () => git.pull(cwd, selectedRepoOf(payload)),
+      )
       return { ok: true }
     },
     'git.branch': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      return git.branches(cwd, selectedRepoOf(payload))
+      return withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteBranches(conn, localRemotePath(cwd, route)),
+        () => git.branches(cwd, selectedRepoOf(payload)),
+      )
     },
     'git.checkout': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      await git.checkout(cwd, requireString(payload, 'branch'), selectedRepoOf(payload))
+      const branch = requireString(payload, 'branch')
+      await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteCheckout(conn, localRemotePath(cwd, route), branch),
+        () => git.checkout(cwd, branch, selectedRepoOf(payload)),
+      )
       return { ok: true }
     },
     'git.log': async (payload) => {
@@ -768,26 +993,60 @@ function buildApi(
       const skip = typeof record.skip === 'number' && Number.isInteger(record.skip) && record.skip >= 0
         ? record.skip
         : undefined
-      return git.log(cwd, count, skip, selectedRepoOf(payload))
+      return withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteLog(conn, localRemotePath(cwd, route), count, skip),
+        () => git.log(cwd, count, skip, selectedRepoOf(payload)),
+      )
     },
     'git.commit-diff': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      return { diff: await git.commitDiff(cwd, requireString(payload, 'hash'), selectedRepoOf(payload)) }
+      const hash = requireString(payload, 'hash')
+      return {
+        diff: await withWorkspace(
+          ctx,
+          cwd,
+          (conn, route) => gitRemote.remoteCommitDiff(conn, localRemotePath(cwd, route), hash),
+          () => git.commitDiff(cwd, hash, selectedRepoOf(payload)),
+        ),
+      }
     },
     'git.discard': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const repoRoot = selectedRepoOf(payload)
-      await git.discard(cwd, await resolveStatusPath(cwd, requireString(payload, 'path'), repoRoot), repoRoot)
+      const raw = requireString(payload, 'path')
+      await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteDiscard(conn, localRemotePath(cwd, route), resolveRemotePath(raw, route)),
+        async () => {
+          const path = await resolveStatusPath(cwd, raw, repoRoot)
+          return git.discard(cwd, path, repoRoot)
+        },
+      )
       return { ok: true }
     },
     'git.revert': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      await git.revert(cwd, requireString(payload, 'hash'), selectedRepoOf(payload))
+      const hash = requireString(payload, 'hash')
+      await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteRevert(conn, localRemotePath(cwd, route), hash),
+        () => git.revert(cwd, hash, selectedRepoOf(payload)),
+      )
       return { ok: true }
     },
     'git.cherry-pick': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
-      await git.cherryPick(cwd, requireString(payload, 'hash'), selectedRepoOf(payload))
+      const hash = requireString(payload, 'hash')
+      await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteCherryPick(conn, localRemotePath(cwd, route), hash),
+        () => git.cherryPick(cwd, hash, selectedRepoOf(payload)),
+      )
       return { ok: true }
     },
     'git.show': async (payload) => {
@@ -801,18 +1060,41 @@ function buildApi(
       // own revisions, the same surface git.diff/git.log already expose.
       const path = requireString(payload, 'path')
       const rev = requireString(payload, 'rev')
-      return { content: await git.show(cwd, rev, path, repoRoot) }
+      return {
+        content: await withWorkspace(
+          ctx,
+          cwd,
+          (conn, route) => gitRemote.remoteShow(conn, localRemotePath(cwd, route), rev, path),
+          () => git.show(cwd, rev, path, repoRoot),
+        ),
+      }
     },
     // The editor's hover blame: ONE line range per request (the tooltip never
     // prefetches a file) and an empty list for every failure — see git.blame.
     'git.blame': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
       const repoRoot = selectedRepoOf(payload)
-      const path = await ensureWorkspacePath(cwd, await resolveGitPath(cwd, requireString(payload, 'path'), repoRoot))
+      const raw = requireString(payload, 'path')
       const startLine = requireLineNumber(payload, 'startLine')
       const endLine = requireLineNumber(payload, 'endLine')
       if (endLine < startLine) throw new SidebarError('bad-request', '"endLine" must not precede "startLine"')
-      return { lines: await git.blame(cwd, path, startLine, endLine, repoRoot) }
+      return {
+        lines: await withWorkspace(
+          ctx,
+          cwd,
+          (conn, route) => gitRemote.remoteBlame(
+            conn,
+            localRemotePath(cwd, route),
+            resolveRemotePath(raw, route),
+            startLine,
+            endLine,
+          ),
+          async () => {
+            const path = await ensureWorkspacePath(cwd, await resolveGitPath(cwd, raw, repoRoot))
+            return git.blame(cwd, path, startLine, endLine, repoRoot)
+          },
+        ),
+      }
     },
     // Commit-message suggestion: build a prompt from the pending changes and
     // stream it through the harness LLM service (`ctx.llm`) — no agent is
@@ -835,7 +1117,12 @@ function buildApi(
       if (route === undefined) {
         throw new SidebarError('git-suggest-error', 'cannot resolve a model route for this conversation', 503)
       }
-      const status = await git.status(cwd, repoRoot)
+      const status = await withWorkspace(
+        ctx,
+        cwd,
+        (conn, route) => gitRemote.remoteStatus(conn, localRemotePath(cwd, route)),
+        () => git.status(cwd, repoRoot),
+      )
       const staged = status.entries.filter(entry => entry.xy[0] !== ' ' && entry.xy[0] !== '?')
       const untracked = status.entries.filter(entry => entry.xy === '??')
       const unstaged = status.entries.filter(entry => entry.xy !== '??' && entry.xy[1] !== ' ' && entry.xy[1] !== '?')
@@ -843,9 +1130,25 @@ function buildApi(
         throw new SidebarError('git-suggest-empty', 'no pending changes', 400)
       }
       const focus = staged.length > 0
-        ? { diff: await git.diff(cwd, undefined, true, repoRoot), files: staged }
+        ? {
+            diff: await withWorkspace(
+              ctx,
+              cwd,
+              (conn, route) => gitRemote.remoteDiff(conn, localRemotePath(cwd, route), undefined, true),
+              () => git.diff(cwd, undefined, true, repoRoot),
+            ),
+            files: staged,
+          }
         : unstaged.length > 0
-          ? { diff: await git.diff(cwd, undefined, false, repoRoot), files: unstaged }
+          ? {
+              diff: await withWorkspace(
+                ctx,
+                cwd,
+                (conn, route) => gitRemote.remoteDiff(conn, localRemotePath(cwd, route), undefined, false),
+                () => git.diff(cwd, undefined, false, repoRoot),
+              ),
+              files: unstaged,
+            }
           : { diff: '', files: untracked }
       const prompt = buildCommitPrompt(language, focus.files.map(entry => entry.path), truncateDiff(focus.diff))
       const message = await streamCommitMessage(ctx, route, prompt.system, prompt.user)
@@ -1387,6 +1690,18 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
           throw new SidebarError('bad-request', 'sessionId, dir, and relativePath are required')
         }
         const cwd = await activeWorktreeRootOf(ctx, sessionId, await sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined))
+        const uploaded = await withRemoteConn(ctx, cwd, (conn, route) => remoteUpload(
+          conn,
+          route,
+          resolveRemoteTarget(cwd, route, dir),
+          relativePath,
+          req,
+          resolved.uploadLimit,
+        ))
+        if (uploaded !== null) {
+          writeOk(res, uploaded)
+          return
+        }
         const { path, size } = await writeWorkspaceUpload({
           cwd,
           dir,
@@ -1464,17 +1779,28 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         // session cwd, absolute stays, `~` expands against the home (#713),
         // remote-mirror namespaces project. Pre-joining here would paste a
         // `~` target after the cwd and hide it from the resolver.
-        // Resolution is the shared contract's alone: relative joins the
-        // session cwd, absolute stays, `~` expands against the home (#713),
-        // remote-mirror namespaces project. Pre-joining here would paste a
-        // `~` target after the cwd and hide it from the resolver.
         const path = await ensureWorkspacePath(cwd, raw)
-        const info = await stat(path)
-        if (!info.isFile() || info.size > resolved.mediaLimit) {
-          throw new SidebarError('fs-error', 'not a file or too large', 400)
+        // A remote workspace serves the bytes over SFTP; the local branch keeps
+        // its existing stat + readFile pair untouched.
+        const fetched = await withRemoteConn(ctx, cwd, async (conn, route) => {
+          const remotePath = localRemotePath(path, route)
+          const info = await remoteStat(conn, remotePath)
+          if (info === undefined || info.type !== 'file' || (info.size ?? 0) > resolved.mediaLimit) {
+            throw new SidebarError('fs-error', 'not a file or too large', 400)
+          }
+          return { body: await remoteReadBytes(conn, remotePath, resolved.mediaLimit) }
+        })
+        let body: Buffer
+        if (fetched !== null) {
+          body = fetched.body
+        } else {
+          const info = await stat(path)
+          if (!info.isFile() || info.size > resolved.mediaLimit) {
+            throw new SidebarError('fs-error', 'not a file or too large', 400)
+          }
+          body = await readFile(path)
         }
         const type = mediaTypeForPath(path)
-        const body = await readFile(path)
         // Raw bytes either way (binary-safe); ?download=1 switches the
         // disposition so the browser saves the file instead of showing it.
         const headers: Record<string, string> = { 'content-type': type, 'cache-control': 'no-cache' }
@@ -1539,12 +1865,25 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         // fallback.
         const cwd = await activeWorktreeRootOf(ctx, sessionId, await sessionCwdOf(ctx, sessionId))
         const absolute = await ensureWorkspacePath(cwd, path)
-        const info = await stat(absolute)
-        if (!info.isFile() || info.size > resolved.mediaLimit) {
-          throw new SidebarError('fs-error', 'not a file or too large', 400)
+        const fetched = await withRemoteConn(ctx, cwd, async (conn, route) => {
+          const remotePath = localRemotePath(absolute, route)
+          const info = await remoteStat(conn, remotePath)
+          if (info === undefined || info.type !== 'file' || (info.size ?? 0) > resolved.mediaLimit) {
+            throw new SidebarError('fs-error', 'not a file or too large', 400)
+          }
+          return { body: await remoteReadBytes(conn, remotePath, resolved.mediaLimit) }
+        })
+        let body: Buffer
+        if (fetched !== null) {
+          body = fetched.body
+        } else {
+          const info = await stat(absolute)
+          if (!info.isFile() || info.size > resolved.mediaLimit) {
+            throw new SidebarError('fs-error', 'not a file or too large', 400)
+          }
+          body = await readFile(absolute)
         }
         const type = mediaTypeForPath(absolute)
-        const body = await readFile(absolute)
         res.writeHead(200, {
           'content-type': type === 'text/html' ? 'text/html; charset=utf-8' : type,
           'cache-control': 'no-cache',
@@ -1686,6 +2025,18 @@ async function handleFsWatchFrame(
   try {
     const cwd = await activeWorktreeRootOf(ctx, sessionId, await sessionCwdOf(ctx, sessionId))
     const dir = await ensureWorkspacePath(cwd, path)
+    // A remote workspace has no local directory to watch: the placeholder is
+    // empty by construction, so a local `fs.watch` on it would report changes
+    // that never correspond to the remote tree (and miss every real one). The
+    // frame is acknowledged as successfully registered so the client keeps its
+    // normal state, but no watcher is created — the explorer's own re-list on
+    // expand is what refreshes a remote level.
+    if (routeByCwd(cwd).kind === 'remote') {
+      if (frame.op === 'watch' && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ dir, ok: true, remote: true }))
+      }
+      return
+    }
     if (frame.op === 'unwatch') {
       watchers.remove(dir)
       return

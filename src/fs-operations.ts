@@ -25,9 +25,20 @@ import { once } from 'node:events'
 import { createWriteStream } from 'node:fs'
 import { access, lstat, mkdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
+import { posix } from 'node:path'
 import { invalidateDirectoryCache, requireAbsolute } from './fs-tree.ts'
 import { ensureWorkspaceWritePath, resolveTarget } from './path-security.ts'
 import { SidebarError } from './wire.ts'
+import {
+  localToRemote,
+  remoteMkdirp,
+  remoteRemove,
+  remoteRename,
+  remoteToLocal,
+  shellQuote,
+  type RemoteConn,
+  type RemoteRoute,
+} from './ssh-remote.ts'
 
 /** Inputs of one upload: the session scope plus the request body stream. */
 export interface WorkspaceUploadInput {
@@ -269,6 +280,111 @@ export async function mkdirWorkspaceEntry(input: WorkspaceMkdirInput): Promise<{
   // The PARENT level gained a row; the new directory's own level is empty.
   invalidateDirectoryCache(absolute)
   return { path: destination }
+}
+
+/**
+ * Remote counterparts of the tree mutations.
+ *
+ * These mirror the local functions above rule-for-rule — the same
+ * single-segment name check, the same "already exists" refusal, the same
+ * "never touch the workspace root" guard — but every filesystem probe and
+ * mutation runs over the dsh-ssh connection. Sharing one validation contract
+ * matters more here than sharing code: a remote tree must refuse exactly what
+ * a local tree refuses, or the two would diverge under the same user gesture.
+ */
+
+/** Whether one remote path exists (a `test -e` probe). */
+async function remotePathExists(conn: RemoteConn, remotePath: string): Promise<boolean> {
+  const r = await conn.exec(`test -e ${shellQuote(remotePath)}`, { timeoutMs: 15_000 })
+  return r.code === 0
+}
+
+/** Refuse the remote workspace root as a mutation target (spelling-aware). */
+function assertNotRemoteRoot(remotePath: string, route: RemoteRoute): void {
+  if (posix.normalize(remotePath) === posix.normalize(route.remoteCwd)) {
+    throw new SidebarError('fs-error', 'cannot modify the workspace root', 400)
+  }
+}
+
+/** Rename one remote tree row within its directory: `path` → `<parent>/<name>`. */
+export async function renameRemoteEntry(
+  conn: RemoteConn,
+  route: RemoteRoute,
+  localPath: string,
+  name: string,
+): Promise<{ path: string }> {
+  if (name === '' || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) {
+    throw new SidebarError('bad-request', 'name must be a single path segment', 400)
+  }
+  const absolute = localToRemote(localPath, route)
+  assertNotRemoteRoot(absolute, route)
+  if (posix.basename(absolute) === name) return { path: remoteToLocal(absolute, route) }
+  const destination = posix.join(posix.dirname(absolute), name)
+  if (await remotePathExists(conn, destination)) {
+    throw new SidebarError('fs-error', `"${name}" already exists`, 409)
+  }
+  await remoteRename(conn, absolute, destination)
+  return { path: remoteToLocal(destination, route) }
+}
+
+/** Create one directory inside an existing remote tree row: `<path>/<name>`. */
+export async function mkdirRemoteEntry(
+  conn: RemoteConn,
+  route: RemoteRoute,
+  localPath: string,
+  name: string,
+): Promise<{ path: string }> {
+  if (name === '' || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) {
+    throw new SidebarError('bad-request', 'name must be a single path segment', 400)
+  }
+  const parent = localToRemote(localPath, route)
+  const destination = posix.join(parent, name)
+  if (await remotePathExists(conn, destination)) {
+    throw new SidebarError('fs-error', `"${name}" already exists`, 409)
+  }
+  await remoteMkdirp(conn, destination)
+  return { path: remoteToLocal(destination, route) }
+}
+
+/**
+ * Create one EMPTY file inside an existing remote tree row.
+ *
+ * The name survives the same Windows-host check as the local path (a row this
+ * plugin creates remotely must still be checkout-able on a Windows host), and
+ * `noclobber` makes the empty write refuse an existing destination instead of
+ * truncating it.
+ */
+export async function createRemoteFile(
+  conn: RemoteConn,
+  route: RemoteRoute,
+  localPath: string,
+  name: string,
+): Promise<{ path: string }> {
+  assertCreatableFileName(name)
+  const parent = localToRemote(localPath, route)
+  const destination = posix.join(parent, name)
+  if (await remotePathExists(conn, destination)) {
+    throw new SidebarError('fs-error', `"${name}" already exists`, 409)
+  }
+  const r = await conn.exec(`set -C; : > ${shellQuote(destination)}`, { timeoutMs: 30_000 })
+  if (r.code !== 0) {
+    // `set -C` (noclobber) makes the redirection fail rather than truncate a
+    // file that appeared between the probe above and this write.
+    throw new SidebarError('fs-error', `cannot create "${name}": ${r.stderr.trim() || `exit ${r.code}`}`, 400)
+  }
+  return { path: remoteToLocal(destination, route) }
+}
+
+/** Delete one remote tree row permanently (recursive for directories). */
+export async function removeRemoteEntry(
+  conn: RemoteConn,
+  route: RemoteRoute,
+  localPath: string,
+): Promise<{ path: string }> {
+  const absolute = localToRemote(localPath, route)
+  assertNotRemoteRoot(absolute, route)
+  await remoteRemove(conn, absolute)
+  return { path: remoteToLocal(absolute, route) }
 }
 
 /**
