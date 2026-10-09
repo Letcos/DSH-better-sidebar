@@ -408,6 +408,13 @@ interface RootRowProps {
   path: string
   iconsVersion: number
   service: BetterSidebarService | undefined
+  /**
+   * Display label for the root row, when the host supplies a better one than
+   * `baseName(path)`. A dsh-ssh remote workspace's cwd is a local placeholder
+   * whose basename is an unreadable base64 segment; the host answers
+   * `<host name> / <remote basename>` instead. Absent for a local workspace.
+   */
+  label?: string
   /** A drag hovers the workspace root (drop target). */
   dropTarget: boolean
   /** A change exists at or below the root (tinted). */
@@ -417,7 +424,7 @@ interface RootRowProps {
 }
 
 const RootRow = memo(function RootRow(props: RootRowProps): ReactNode {
-  const { path, iconsVersion, service, dropTarget, gitChanged, copied, actions } = props
+  const { path, iconsVersion, service, label, dropTarget, gitChanged, copied, actions } = props
   void iconsVersion
   const icon = service !== undefined ? service.folderIcon(path, true, 14) : builtinFolderIcon(true, 14)
   return (
@@ -432,7 +439,7 @@ const RootRow = memo(function RootRow(props: RootRowProps): ReactNode {
       onContextMenu={(event) => { actions.contextMenu(event, path, true) }}
     >
       {icon}
-      <span className={clsx(css.explorerName, gitChanged && css.explorerDirChanged)}>{baseName(path)}</span>
+      <span className={clsx(css.explorerName, gitChanged && css.explorerDirChanged)}>{label ?? baseName(path)}</span>
       {copied
         ? <span className={css.explorerCopied}>{t('copied')}</span>
         : (
@@ -491,6 +498,12 @@ function sameScope(armed: FsScope | undefined, live: FsScope | undefined): boole
 export function FileTree(props: {
   sessionId: string
   cwd: string | undefined
+  /**
+   * Display label for the root row, when the host supplies a better one than
+   * the cwd's own basename (a dsh-ssh remote workspace answers
+   * `<host name> / <remote basename>`). Absent → the row keeps `baseName(cwd)`.
+   */
+  cwdLabel?: string
   expanded: string[]
   /** Files highlighted by a "Show in folder" reveal (absolute paths). */
   revealed: string[]
@@ -576,7 +589,7 @@ export function FileTree(props: {
   // callbacks must not change identity when the caller re-renders).
   // `onReferenceFile` is read through `propsRef` like the other row callbacks.
   const {
-    sessionId, cwd, expanded, revealed, onOpenFileNewTab, onOpenFileSide,
+    sessionId, cwd, cwdLabel, expanded, revealed, onOpenFileNewTab, onOpenFileSide,
     openInApp, openWithTargets, openWithPinned, openWithSsh, onOpenWith, onToggleOpenWithPin,
     openWithShowPluginTargets, exclude,
     onPathRenamed, onPathDeleted, refreshTick, onUploadRequest, busy, hidden, visible, service,
@@ -2112,6 +2125,7 @@ export function FileTree(props: {
             path={root}
             iconsVersion={iconsVersion}
             service={service}
+            {...(cwdLabel !== undefined ? { label: cwdLabel } : {})}
             dropTarget={dropTarget === root}
             gitChanged={gitStatus.dirHasChanges(root)}
             copied={copiedPath === root}

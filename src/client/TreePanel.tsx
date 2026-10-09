@@ -32,6 +32,8 @@ import type { OpenInApp } from './open-in-app.ts'
 import type { OpenWithTarget } from './open-with.ts'
 import { t } from './locales.ts'
 import { isWithinWorkspace, resolveSidebarPath } from './paths.ts'
+import { useSessionRootLabel } from './use-session-root.ts'
+import type { Context } from '../context-types.ts'
 import { IconButton } from './ui/index.ts'
 import { UploadOverlay } from './UploadOverlay.tsx'
 import {
@@ -53,6 +55,12 @@ interface UploadSession {
 export function TreePanel(props: {
   sessionId: string
   cwd: string | undefined
+  /**
+   * Client plugin context, used only to resolve the host's readable root label
+   * for a remote workspace. Optional so a caller (or a test) that renders the
+   * tree without a context still gets the plain basename title.
+   */
+  ctx?: Context
   expanded: string[]
   revealed: string[]
   onToggle: (path: string) => void
@@ -96,11 +104,17 @@ export function TreePanel(props: {
   service?: BetterSidebarService
 }) {
   const {
-    sessionId, cwd, expanded, revealed, onToggle, onOpenFile, onOpenFileNewTab, onOpenFileSide,
+    sessionId, cwd, ctx, expanded, revealed, onToggle, onOpenFile, onOpenFileNewTab, onOpenFileSide,
     openInApp, openWithTargets, openWithPinned, openWithSsh, onOpenWith, onToggleOpenWithPin,
     openWithShowPluginTargets, exclude,
     onReferenceFile, onPathRenamed, onPathDeleted, visible, full, service,
   } = props
+  // The root row prints the host's readable label when it has one (a dsh-ssh
+  // remote workspace answers `<host name> / <remote basename>`; its cwd's own
+  // basename is a base64 segment). Resolved HERE rather than threaded through
+  // every caller: the label is a pure function of the session the panel was
+  // already given.
+  const cwdLabel = useSessionRootLabel(ctx, sessionId)
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<{ matches: string[]; dirs: string[]; truncated: boolean } | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -376,6 +390,7 @@ export function TreePanel(props: {
       <FileTree
         sessionId={sessionId}
         cwd={cwd}
+        {...(cwdLabel !== undefined ? { cwdLabel } : {})}
         expanded={expanded}
         revealed={revealed}
         onToggle={onToggle}

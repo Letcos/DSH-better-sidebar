@@ -513,6 +513,7 @@ export function EditorHost(props: {
           visible={visible}
           sessionId={scope.sessionId}
           cwd={folderRoot ?? scope.cwd}
+          ctx={ctx}
           expanded={expanded}
           revealed={revealed}
           onToggle={onToggleDir}
@@ -645,6 +646,7 @@ export function EditorHost(props: {
               visible={visible}
               sessionId={scope.sessionId}
               cwd={scope.cwd}
+              ctx={ctx}
               expanded={expanded}
               revealed={revealed}
               onToggle={onToggleDir}
